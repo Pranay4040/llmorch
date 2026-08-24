@@ -27,7 +27,7 @@ from llmorch.quota.windows import (
 from llmorch.registry.manifest import load_manifest
 from llmorch.types import Admission, Priority, RateLimitSnapshot, Ticket, Usage
 
-GROQ = "groq/llama-3.3-70b"
+GROQ = "groq/gpt-oss-120b"
 GEMINI = "gemini/2.5-flash"
 
 
@@ -187,9 +187,9 @@ def test_rpm_window_recovers_after_a_minute(gov, clock):
 
 
 def test_tpm_pressure_blocks_before_rpm_does_on_groq(gov):
-    """With only 6,000 tokens/minute, Groq runs out of tokens long before it
-    runs out of requests."""
-    _grant(gov, GROQ, 1000, 2000)  # reserves 3,750
+    """With only 8,000 tokens/minute, Groq runs out of tokens long before it
+    runs out of requests — two ordinary nodes are already most of the window."""
+    _grant(gov, GROQ, 2000, 3000)  # reserves 6,250 of 8,000
     denial = gov.try_acquire(GROQ, 1000, 1000)  # wants 2,500 more
     assert denial.verdict is Admission.WAIT
 
@@ -370,7 +370,7 @@ def test_headroom_reports_each_provider_in_its_own_timezone(gov):
     assert head[GROQ].reset_tz == "UTC"
     assert head[GEMINI].reset_tz == "America/Los_Angeles"
     assert head[GEMINI].requests_limit == 250
-    assert head[GROQ].tokens_limit_minute == 6000
+    assert head[GROQ].tokens_limit_minute == 8000
 
 
 def test_wait_time_zero_means_available_now(gov):

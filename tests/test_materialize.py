@@ -171,7 +171,7 @@ def _node(node_id, path, kind=OutputKind.CODE, role=Role.FRONTEND):
     )
 
 
-def _done(node_id, artifact, model="groq/llama-3.3-70b"):
+def _done(node_id, artifact, model="groq/gpt-oss-120b"):
     return NodeResult(
         node_id=node_id, state=NodeState.DONE, artifact=artifact, model_id=model
     )
@@ -251,10 +251,10 @@ def test_readme_attributes_each_file_to_its_model(tmp_path):
     nodes = {"n1": _node("n1", "index.html"), "n2": _node("n2", "server.py")}
     results = {
         "n1": _done("n1", "<h1>hi</h1>", model="gemini/2.5-flash"),
-        "n2": _done("n2", "print(1)", model="groq/llama-3.3-70b"),
+        "n2": _done("n2", "print(1)", model="groq/gpt-oss-120b"),
     }
     materialize(tmp_path, nodes, results)
 
     readme = (tmp_path / "README.md").read_text()
     assert "gemini/2.5-flash" in readme
-    assert "groq/llama-3.3-70b" in readme
+    assert "groq/gpt-oss-120b" in readme

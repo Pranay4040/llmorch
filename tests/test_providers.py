@@ -32,8 +32,8 @@ from llmorch.providers.openai_compat import (
 from llmorch.registry.manifest import load_manifest
 from llmorch.types import ChatRequest, Message
 
-MODEL = "groq/llama-3.3-70b"
-WIRE = "llama-3.3-70b-versatile"
+MODEL = "groq/gpt-oss-120b"
+WIRE = "openai/gpt-oss-120b"
 
 
 def _provider(transport, **kw) -> OpenAICompatProvider:
@@ -382,7 +382,7 @@ def test_build_provider_maps_every_model_id_to_its_wire_name():
         manifest.providers["groq"], manifest.models, "key", transport=lambda r: None
     )
 
-    assert provider.wire_name("groq/llama-3.3-70b") == "llama-3.3-70b-versatile"
     assert provider.wire_name("groq/gpt-oss-120b") == "openai/gpt-oss-120b"
+    assert provider.wire_name("groq/qwen3.6-27b") == "qwen/qwen3.6-27b"
     # Gemini's models belong to a different adapter instance.
     assert "gemini/2.5-flash" not in provider.wire_names

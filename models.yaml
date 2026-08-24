@@ -4,9 +4,10 @@
 # which is why they live in YAML. Per-machine overrides go in models.local.yaml
 # (gitignored), which is deep-merged over this file at load time.
 #
-# Wire names for providers other than Groq's llama-3.3-70b are unverified until
-# Milestone 2; `llmorch doctor` confirms each one with a single trivial call
-# before anything depends on it.
+# Groq's entries were verified against the live API by `llmorch doctor --live`
+# and corrected: two of the three original wire names did not exist on this
+# account, and none of the three published limits matched. Gemini's entry is
+# still unverified — no GEMINI_API_KEY yet.
 
 version: 1
 
@@ -18,9 +19,18 @@ providers:
 
   # -------------------------------------------------------------------------
   # Groq — the request workhorse.
-  # Abundant daily requests, but a brutally tight 6,000 tokens/minute ceiling
-  # that makes large-context calls permanently unservable rather than merely
-  # delayed. Short prompts and short outputs only.
+  # Every value below was read from live response headers, not documentation.
+  #
+  # The daily cap is 1,000 per model, not the 14,400 originally assumed, and
+  # Groq enforces it as a LEAKY BUCKET rather than a midnight reset: the
+  # x-ratelimit-reset-requests header comes back at 86400/limit seconds per
+  # request spent (86.4s each at 1,000/day, confirmed across three models).
+  # Capacity therefore trickles back all day instead of arriving at once.
+  #
+  # Limits differ per model on this account — compound is 250/day and allam
+  # 7,000/day — so only models sharing the 1,000 / 8,000 pair are enabled
+  # here. Adding the others needs per-model limit overrides, which the manifest
+  # does not yet support (see PROJECT.md).
   # -------------------------------------------------------------------------
   groq:
     enabled: true
@@ -30,10 +40,15 @@ providers:
     reset_tz: UTC
     paid: false
     limits:
-      # Org-scoped: extra API keys do not raise this.
+      # Org-scoped: extra API keys do not raise this. Still the documented
+      # figure — the headers expose no per-minute request ceiling to check it
+      # against, so it stays as the conservative assumption.
       - {kind: rpm, scope: account, value: 30}
-      - {kind: tpm, scope: model, value: 6000}
-      - {kind: rpd, scope: model, value: 14400, reserve: 200}
+      # Verified per-model: x-ratelimit-limit-tokens = 8000 on every enabled
+      # model, and each model reports its own remaining count.
+      - {kind: tpm, scope: model, value: 8000}
+      # Verified per-model: x-ratelimit-limit-requests = 1000.
+      - {kind: rpd, scope: model, value: 1000, reserve: 50}
 
   # -------------------------------------------------------------------------
   # Gemini — the long-context specialist.
@@ -122,50 +137,20 @@ models:
 
   # --- Groq ----------------------------------------------------------------
 
-  # max_output is capped at 4096 rather than the model's true 8192 ceiling.
-  # Groq's 6,000 TPM allows ~5,400 tokens per request, so an 8,192-token output
-  # could never be served at all. 4096 leaves ~1,300 tokens for the prompt —
-  # which is why Groq nodes must stay small and why the interface contract is
-  # passed as a compact summary rather than pasted wholesale.
-  - id: groq/llama-3.3-70b
-    provider: groq
-    wire_name: llama-3.3-70b-versatile
-    context: 131072
-    max_output: 4096
-    quality_prior: 0.72
-    supports_json_schema: true
-    role_affinity:
-      planning: 0.55
-      research: 0.25      # no web access
-      backend: 0.70
-      frontend: 0.45
-      styling: 0.35
-      content: 0.50
-      review: 0.75        # strong critic
-      integration: 0.60
-
-  - id: groq/qwen3-32b
-    provider: groq
-    wire_name: qwen3-32b
-    context: 131072
-    max_output: 4096      # capped by Groq's 6,000 TPM, not by the model
-    quality_prior: 0.68
-    supports_json_schema: true
-    role_affinity:
-      planning: 0.45
-      research: 0.20
-      backend: 0.65
-      frontend: 0.62      # noticeably better at markup than Llama
-      styling: 0.60
-      content: 0.45
-      review: 0.60
-      integration: 0.55
-
+  # max_output stays at 4096 against a verified 8,000 TPM ceiling, which caps a
+  # single request at ~7,200 tokens and leaves ~3,100 for the prompt. Groq
+  # nodes must still stay small, which is why the interface contract travels as
+  # a compact summary rather than being pasted wholesale.
+  #
+  # Note for whoever wires the prompts: gpt-oss spends reasoning tokens before
+  # emitting anything. A probe with max_tokens=16 returned an EMPTY string and
+  # 14 reasoning tokens — the budget went entirely on thinking. These models
+  # need generous headroom or they return nothing at all.
   - id: groq/gpt-oss-120b
     provider: groq
     wire_name: openai/gpt-oss-120b
     context: 131072
-    max_output: 4096      # capped by Groq's 6,000 TPM, not by the model
+    max_output: 4096
     quality_prior: 0.74
     supports_json_schema: true
     role_affinity:
@@ -177,6 +162,51 @@ models:
       content: 0.60
       review: 0.70
       integration: 0.62
+
+  # The smaller sibling. Kept because a chain rung at the same vendor is still
+  # worth having once the cross-vendor rung is exhausted, and because it is
+  # measurably faster (429ms vs 595ms on the probe).
+  - id: groq/gpt-oss-20b
+    provider: groq
+    wire_name: openai/gpt-oss-20b
+    context: 131072
+    max_output: 4096
+    quality_prior: 0.62
+    supports_json_schema: true
+    role_affinity:
+      planning: 0.50
+      research: 0.25
+      backend: 0.58
+      frontend: 0.52
+      styling: 0.48
+      content: 0.52
+      review: 0.58
+      integration: 0.52
+
+  # Replaces qwen3-32b, which does not exist on this account. Alibaba's model,
+  # and the only non-OpenAI general model Groq still serves here — so it is
+  # what keeps the Groq half of the roster from being one vendor.
+  #
+  # WARNING for M4: this one emits <think>...</think> blocks inline in the
+  # message content rather than in a reasoning field. The probe replied with a
+  # literal <think> block opening the message. Salvage must strip those before
+  # an artifact is written, or every file it produces opens with a monologue.
+  - id: groq/qwen3.6-27b
+    provider: groq
+    wire_name: qwen/qwen3.6-27b
+    context: 131072
+    max_output: 4096
+    quality_prior: 0.68
+    supports_json_schema: true
+    role_affinity:
+      planning: 0.45
+      research: 0.20
+      backend: 0.65
+      frontend: 0.62
+      styling: 0.60
+      content: 0.45
+      review: 0.60
+      integration: 0.55
 
   # --- Gemini --------------------------------------------------------------
 
@@ -206,14 +236,14 @@ models:
 # ===========================================================================
 
 roles:
-  planning:    [gemini/2.5-flash, groq/gpt-oss-120b, groq/llama-3.3-70b]
+  planning:    [gemini/2.5-flash, groq/gpt-oss-120b, groq/gpt-oss-20b]
   research:    [gemini/2.5-flash, groq/gpt-oss-120b]
-  backend:     [groq/llama-3.3-70b, gemini/2.5-flash, groq/gpt-oss-120b]
-  frontend:    [gemini/2.5-flash, groq/qwen3-32b, groq/llama-3.3-70b]
-  styling:     [groq/qwen3-32b, gemini/2.5-flash]
+  backend:     [groq/gpt-oss-120b, gemini/2.5-flash, groq/qwen3.6-27b]
+  frontend:    [gemini/2.5-flash, groq/qwen3.6-27b, groq/gpt-oss-120b]
+  styling:     [groq/qwen3.6-27b, gemini/2.5-flash]
   content:     [gemini/2.5-flash, groq/gpt-oss-120b]
-  review:      [groq/llama-3.3-70b, gemini/2.5-flash, groq/gpt-oss-120b]
-  integration: [gemini/2.5-flash, groq/gpt-oss-120b, groq/llama-3.3-70b]
+  review:      [groq/gpt-oss-120b, gemini/2.5-flash, groq/qwen3.6-27b]
+  integration: [gemini/2.5-flash, groq/gpt-oss-120b, groq/qwen3.6-27b]
 
 # ===========================================================================
 # Defaults

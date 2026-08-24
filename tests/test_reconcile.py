@@ -16,8 +16,8 @@ from llmorch.negotiate.roles import needs_review, parse_role
 from llmorch.registry.manifest import load_manifest
 from llmorch.types import Bid, OutputKind, Role, TaskNode
 
-GROQ = "groq/llama-3.3-70b"
-QWEN = "groq/qwen3-32b"
+GROQ = "groq/gpt-oss-120b"
+QWEN = "groq/qwen3.6-27b"
 GEMINI = "gemini/2.5-flash"
 
 

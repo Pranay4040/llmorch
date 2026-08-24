@@ -181,6 +181,8 @@ def parse_rate_limit(
 
     remaining_requests = _int(_get(headers, "x-ratelimit-remaining-requests"))
     remaining_tokens = _int(_get(headers, "x-ratelimit-remaining-tokens"))
+    limit_requests = _int(_get(headers, "x-ratelimit-limit-requests"))
+    limit_tokens = _int(_get(headers, "x-ratelimit-limit-tokens"))
     reset_requests_s = parse_duration(_get(headers, "x-ratelimit-reset-requests"))
     reset_tokens_s = parse_duration(_get(headers, "x-ratelimit-reset-tokens"))
     retry_after_s = parse_retry_after(_get(headers, "retry-after"), now=now)
@@ -198,6 +200,8 @@ def parse_rate_limit(
     return RateLimitSnapshot(
         remaining_requests=remaining_requests,
         remaining_tokens=remaining_tokens,
+        limit_requests=limit_requests,
+        limit_tokens=limit_tokens,
         reset_requests_s=reset_requests_s,
         reset_tokens_s=reset_tokens_s,
         retry_after_s=retry_after_s,

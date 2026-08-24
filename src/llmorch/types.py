@@ -121,6 +121,11 @@ class RateLimitSnapshot:
 
     remaining_requests: int | None = None
     remaining_tokens: int | None = None
+    limit_requests: int | None = None
+    """The ceiling the server says it is enforcing, which is not necessarily
+    the one models.yaml declares. Deriving usage from a stale local number is
+    how two requests come to look like thirteen thousand."""
+    limit_tokens: int | None = None
     reset_requests_s: float | None = None
     reset_tokens_s: float | None = None
     retry_after_s: float | None = None

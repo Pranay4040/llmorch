@@ -20,8 +20,8 @@ from llmorch.quota.windows import FakeClock
 from llmorch.registry.manifest import load_manifest
 from llmorch.types import LimitKind, LimitScope, Usage
 
-GROQ = "groq/llama-3.3-70b"
-QWEN = "groq/qwen3-32b"
+GROQ = "groq/gpt-oss-120b"
+QWEN = "groq/qwen3.6-27b"
 GEMINI = "gemini/2.5-flash"
 
 # Deliberately late in the UTC day and *still the previous day* in Pacific:
@@ -333,3 +333,38 @@ def test_per_request_fee_dominates_a_short_paid_call(manifest):
 
     assert cost == Decimal("0.011")
     assert perplexity.cost.per_request / cost > Decimal("0.8")
+
+
+# ==========================================================================
+# History outliving the manifest
+#
+# The ledger is permanent and the manifest is not. Vendors retire and rename
+# models — `llama-3.3-70b-versatile` and `qwen3-32b` both vanished from this
+# account between M1 and M2 — so restoring history will meet ids that are no
+# longer declared, and must not fall over on them.
+# ==========================================================================
+
+
+def test_restore_survives_a_model_the_manifest_no_longer_declares(store, manifest):
+    clock = FakeClock(_now=STRADDLE)
+    store.record(_event("groq/llama-3.3-70b", "groq", "UTC"))  # retired by Groq
+    store.record(_event(GROQ, "groq", "UTC"))
+
+    governor = Governor(manifest, clock=clock)
+    governor.restore_daily(
+        store.usage_by_model_today(governor.reset_timezones(), now=STRADDLE)
+    )
+
+    assert governor.headroom()[GROQ].requests_used == 1
+    assert governor.unknown_restored == ["groq/llama-3.3-70b"], (
+        "a dropped model should be reported, not silently discarded"
+    )
+
+
+def test_a_retired_model_does_not_break_the_ledger_view(store, manifest):
+    # `llmorch ledger` and `llmorch quota` both read history; neither may raise
+    # just because a vendor renamed something.
+    store.record(_event("groq/qwen3-32b", "groq", "UTC"))
+    totals = store.usage_by_model_today({"groq": "UTC"}, now=STRADDLE)
+    assert totals["groq/qwen3-32b"] == (1, 300)
+    assert not manifest.knows("groq/qwen3-32b")

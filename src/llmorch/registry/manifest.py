@@ -150,6 +150,15 @@ class Manifest(BaseModel):
                 return m
         raise ManifestError(f"unknown model {model_id!r}")
 
+    def knows(self, model_id: str) -> bool:
+        """Whether this model is still declared.
+
+        The ledger outlives the manifest: it holds every model ever used on
+        this account, including ones since renamed or retired by the vendor.
+        Callers reading history have to ask before assuming.
+        """
+        return any(m.id == model_id for m in self.models)
+
     def provider_of(self, model_id: str) -> ProviderSpec:
         return self.providers[self.model(model_id).provider]
 

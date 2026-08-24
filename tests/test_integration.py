@@ -228,8 +228,8 @@ def test_repeated_failures_trip_the_breaker_and_move_pending_work(manifest):
         f"{node}@groq/gpt-oss-120b": FaultMode.UNPARSEABLE_CODE
         for node in ("index", "detail")
     }
-    faults["style@groq/qwen3-32b"] = FaultMode.UNPARSEABLE_CODE
-    faults["client@groq/qwen3-32b"] = FaultMode.UNPARSEABLE_CODE
+    faults["style@groq/qwen3.6-27b"] = FaultMode.UNPARSEABLE_CODE
+    faults["client@groq/qwen3.6-27b"] = FaultMode.UNPARSEABLE_CODE
 
     scheduler, _, _ = _harness(manifest, faults=faults, config=cfg)
     outcome = asyncio.run(scheduler.run())

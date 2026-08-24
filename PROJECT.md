@@ -1,8 +1,7 @@
 # llmorch — Project Blueprint & Status
 
 > Self-contained handoff. Everything needed to resume work with no prior context.
-> Last updated: Milestone 2 built and verified offline; the live wire-name
-> probe has not yet been run.
+> Last updated: Milestone 2 complete. Groq is verified live.
 
 ---
 
@@ -88,15 +87,15 @@ another **without the models ever talking to each other**.
 
 ## 4. Current status
 
-**Milestones 0 and 1 are COMPLETE. M2 is built and green offline — 288 tests
-pass, 1 skipped** (symlink test needs admin on Windows).
+**Milestones 0, 1 and 2 are COMPLETE. 290 tests pass, 1 skipped** (symlink
+test needs admin on Windows).
 
-The one part of M2 still outstanding needs the network: `llmorch doctor --live`
-has not been run, so the Groq wire names in models.yaml remain unverified.
-Everything else in M2 — the adapter, header parsing, the ledger, live wiring —
-is exercised end to end against a canned HTTP transport in
-`tests/test_live_pipeline.py`, which runs the real adapter and the real ledger
-with only the socket faked.
+`llmorch doctor --live --provider groq` has been run against the real API and
+all three Groq models answer. The probe was worth its four requests: **two of
+the three original wire names did not exist, and not one of the three published
+limits was correct.** See §5a.
+
+M3 is blocked only on `GEMINI_API_KEY`.
 
 Verified working end to end:
 
@@ -107,6 +106,38 @@ python -m llmorch run "build a notes app"
 Splits work across 4 models / 2 vendors, writes `runs/<id>/output/`, and the
 generated app genuinely serves: POST creates a note, GET lists, detail fetches,
 `/` returns the page. All against mocks — zero network calls.
+
+### Verified live (Groq, 2026-08-24)
+
+Read from real `x-ratelimit-*` response headers, not documentation:
+
+| model | wire name | RPD | TPM |
+|---|---|---|---|
+| `groq/gpt-oss-120b` | `openai/gpt-oss-120b` | 1,000 | 8,000 |
+| `groq/gpt-oss-20b` | `openai/gpt-oss-20b` | 1,000 | 8,000 |
+| `groq/qwen3.6-27b` | `qwen/qwen3.6-27b` | 1,000 | 8,000 |
+
+Also on the account but **not enabled**, because their limits differ and the
+manifest declares limits per *provider* rather than per model:
+`groq/compound` and `groq/compound-mini` (250/day, 70,000 TPM), `allam-2-7b`
+(7,000/day, 6,000 TPM). Enabling them needs per-model limit overrides — the
+most valuable single addition available, since compound's 70,000 TPM is nine
+times the ceiling everything else works under.
+
+Three operational facts the probe turned up, all of which will matter later:
+
+- **Groq's daily cap is a leaky bucket, not a midnight reset.**
+  `x-ratelimit-reset-requests` comes back at `86400/limit` seconds per request
+  spent — 86.4s each at 1,000/day, confirmed across three models with different
+  caps. Capacity trickles back all day. `DayCounter` still models it as a UTC
+  midnight reset, so `llmorch quota` shows "resets in 15h00m" when in truth a
+  slot frees every ~86 seconds. Conservative, but wrong.
+- **gpt-oss spends reasoning tokens before saying anything.** A probe with
+  `max_tokens=16` returned an *empty string* and 14 reasoning tokens. Starve
+  these models and they return nothing at all.
+- **qwen3.6 emits `<think>` blocks inline in the message content**, not in a
+  separate reasoning field. Salvage must strip them or every artifact it writes
+  opens with a monologue.
 
 ### Environment
 - Python **3.14.1**, venv at `.venv/`
@@ -171,6 +202,8 @@ generated app genuinely serves: POST creates a note, GET lists, detail fetches,
 
 ## 5. Bugs found during the build (all fixed)
 
+<a name="5a"></a>
+
 Each would have cost live quota to discover — the reason for building offline first.
 
 1. **models.yaml was internally invalid.** Groq models declared
@@ -206,7 +239,19 @@ Found during Milestone 2 — the first three only appear once real code runs:
    returning garbage — and the breaker exists only to judge the latter. Daily
    429s still bench the model, which is the real distinction.
 
-7. **`llmorch run` crashed on a default Windows console.** The report tables
+7. **`sync_from_headers` derived usage from the manifest's ceiling, not the
+   server's.** With a declared 14,400 and a real 1,000, `remaining=998` read as
+   13,402 requests spent — a healthy provider benched instantly, on its second
+   call. It now subtracts from `x-ratelimit-limit-requests` when the server
+   sends one, which it always does.
+
+8. **Restoring the ledger crashed on a retired model id.** The ledger is
+   permanent, the manifest is not: both `llama-3.3-70b-versatile` and
+   `qwen3-32b` vanished from the account between M1 and M2, and afterwards
+   every command that reads history raised `unknown model`. Unknown ids are now
+   skipped and reported in `governor.unknown_restored`.
+
+9. **`llmorch run` crashed on a default Windows console.** The report tables
    print em dashes and box glyphs; cp1252 stdout cannot encode them, so the run
    died mid-render before writing anything. It had only ever been run in a
    UTF-8 terminal. stdout/stderr are now reconfigured at entry.
@@ -247,7 +292,7 @@ Found during Milestone 2 — the first three only appear once real code runs:
 |---|---|---|---|
 | M0 | Setup, secret hygiene | **DONE** | — |
 | M1 | Offline skeleton, zero API calls | **DONE** | — |
-| M2 | First real requests, **Groq only** | next | GROQ_API_KEY |
+| M2 | First real requests, **Groq only** | **DONE** | — |
 | M3 | Add Gemini; cross-vendor failover live | | GEMINI_API_KEY |
 | M3.5 | NVIDIA NIM + Mistral (adaptive limit discovery) | | those keys |
 | M4 | Negotiation live + Tier 1 cross-vendor review | | — |
@@ -262,18 +307,18 @@ All of it is built: `providers/openai_compat.py`, `providers/headers.py`,
 Groq first **deliberately**: 14,400 requests/day makes it the safe place to
 debug header parsing and counter sync.
 
-**Still unverified — the one remaining M2 step.** The Groq wire names in
-models.yaml (`llama-3.3-70b-versatile`, `qwen3-32b`, `openai/gpt-oss-120b`)
-have never been checked against the live API, and a wrong one fails exactly
-like a dead model: mid-run, after quota has been spent on its neighbours.
+**Done.** `llmorch doctor --live --provider groq` confirms all three wire
+names against the real API for one request each. Re-run it whenever models.yaml
+changes — it is cheap, and it is the only thing standing between a renamed
+model and a mid-run failure that looks exactly like a dead one.
 
 ```bash
 llmorch doctor --live --provider groq
 ```
 
-One trivial call per model (3 requests of Groq's 14,400/day) settles it. A
-`GROQ_API_KEY` is present in the environment — not in `.env` — so this is
-runnable now. `GEMINI_API_KEY` is still unset, which leaves M3 blocked.
+The `GROQ_API_KEY` lives in the **environment, not `.env`** — worth moving into
+`.env` so runs work from any shell. `GEMINI_API_KEY` is still unset, which is
+the only thing blocking M3.
 
 ### Decisions already made (do not re-litigate)
 

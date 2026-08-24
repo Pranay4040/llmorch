@@ -100,6 +100,8 @@ class Governor:
         self._run_requests: dict[str, int] = {}
         self._tickets: dict[str, Ticket] = {}
         self._wakeup = asyncio.Event()
+        self.unknown_restored: list[str] = []
+        """Model ids found in the ledger that the manifest no longer declares."""
 
     # -- state keys -------------------------------------------------------
 
@@ -400,8 +402,17 @@ class Governor:
         """
         now = self.clock.now_utc()
         totals: dict[str, tuple[int, int]] = {}
+        self.unknown_restored: list[str] = []
 
         for model_id, (requests, tokens) in usage_by_model.items():
+            if not self.manifest.knows(model_id):
+                # History from a manifest that no longer holds. Vendors retire
+                # and rename models, and the ledger keeps the old ids forever;
+                # raising here would brick every command that reads history
+                # after a rename. The usage is unattributable to any current
+                # bucket, so it is dropped — visibly, not silently.
+                self.unknown_restored.append(model_id)
+                continue
             provider = self.manifest.provider_of(model_id)
             scopes = {lim.scope for lim in provider.limits} or {LimitScope.MODEL}
             for scope in scopes:
@@ -437,7 +448,13 @@ class Governor:
         for state, prov in self._states_for(model_id):
             rpd_spec = prov.limit(LimitKind.RPD)
             if snap.remaining_requests is not None and rpd_spec and state.rpd:
-                used = max(0, rpd_spec.value - snap.remaining_requests)
+                # Subtract from the ceiling the *server* names, falling back to
+                # the manifest only when it says nothing. Using a stale local
+                # number here turns a healthy provider into an exhausted one:
+                # against a declared 14,400 and a real 1,000, two requests
+                # spent reads as 13,402 and the model is benched instantly.
+                ceiling = snap.limit_requests or rpd_spec.value
+                used = max(0, ceiling - snap.remaining_requests)
                 state.rpd.set_count(now_w, used)
 
             if snap.retry_after_s:

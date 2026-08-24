@@ -38,10 +38,11 @@ def test_deferred_providers_are_documented_but_inactive(manifest):
 
 
 def test_groq_tpm_is_the_binding_constraint(manifest):
+    # Both figures read from live x-ratelimit headers, not documentation.
     groq = manifest.providers["groq"]
-    assert groq.limit(LimitKind.TPM).value == 6000
-    # ~5,400 tokens: anything larger can never be served by Groq.
-    assert groq.max_request_tokens == 5400
+    assert groq.limit(LimitKind.TPM).value == 8000
+    # ~7,200 tokens: anything larger can never be served by Groq.
+    assert groq.max_request_tokens == 7200
 
 
 def test_groq_rpm_is_account_scoped(manifest):
@@ -64,7 +65,7 @@ def test_gemini_reserves_headroom_for_critical_path_retries(manifest):
 def test_capability_sheet_matches_the_intended_split(manifest):
     """Research should favour Gemini; backend should favour a Groq model."""
     gemini = manifest.model("gemini/2.5-flash")
-    llama = manifest.model("groq/llama-3.3-70b")
+    llama = manifest.model("groq/gpt-oss-120b")
 
     assert gemini.affinity(Role.RESEARCH) > llama.affinity(Role.RESEARCH)
     assert llama.affinity(Role.BACKEND) > llama.affinity(Role.RESEARCH)
@@ -77,8 +78,8 @@ def test_every_chain_spans_at_least_two_vendors(manifest):
 
 
 def test_max_request_tokens_is_the_tighter_of_context_and_tpm(manifest):
-    # Groq: 131k context but a 6k TPM ceiling -> TPM wins.
-    assert manifest.max_request_tokens("groq/llama-3.3-70b") == 5400
+    # Groq: 131k context but an 8k TPM ceiling -> TPM wins.
+    assert manifest.max_request_tokens("groq/gpt-oss-120b") == 7200
     # Gemini: 250k TPM against a 1M context -> context is not the limit.
     assert manifest.max_request_tokens("gemini/2.5-flash") == 225000
 

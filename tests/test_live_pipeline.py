@@ -31,7 +31,7 @@ from llmorch.quota.windows import FakeClock
 from llmorch.registry.manifest import load_manifest
 from llmorch.types import NodeState
 
-GROQ_MODELS = ("llama-3.3-70b-versatile", "qwen3-32b", "openai/gpt-oss-120b")
+GROQ_MODELS = ("openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.6-27b")
 
 
 @pytest.fixture(scope="module")
@@ -167,8 +167,9 @@ def test_every_request_sets_max_tokens(manifest, tmp_path):
 
 
 def test_no_request_exceeds_groqs_per_minute_ceiling(manifest, tmp_path):
-    # 6,000 TPM caps a Groq request at ~5,400 tokens. Anything above it is
-    # permanently unservable, so the governor must never have let it through.
+    # A verified 8,000 TPM caps a Groq request at ~7,200 tokens. Anything above
+    # that is permanently unservable, so the governor must never have let it
+    # through; max_output holds each model well under the line.
     transport = RecordingTransport()
     with open_store(tmp_path / "l.db") as store:
         scheduler, _ = _harness(manifest, store, transport)
@@ -272,7 +273,7 @@ def test_a_daily_429_does_bench_the_model(manifest, tmp_path):
     failure = HttpResponse(
         429,
         {},
-        json.dumps({"error": {"message": "Limit 14400, used 14400 per day"}}),
+        json.dumps({"error": {"message": "Limit 1000, used 1000 per day"}}),
     )
     transport = RecordingTransport(fail={"schema": failure}, fail_times={"schema": 1})
 
@@ -282,7 +283,7 @@ def test_a_daily_429_does_bench_the_model(manifest, tmp_path):
 
     benched = [
         m
-        for m in ("groq/llama-3.3-70b", "groq/qwen3-32b", "groq/gpt-oss-120b")
+        for m in ("groq/gpt-oss-120b", "groq/gpt-oss-20b", "groq/qwen3.6-27b")
         if scheduler.health.status(m).value == "exhausted"
     ]
     assert benched, "a daily cap should take the model out of the chains"
@@ -314,12 +315,18 @@ def test_spend_from_a_live_run_survives_into_the_next_process(manifest, tmp_path
 def test_rate_limit_headers_are_believed_over_local_counting(manifest, tmp_path):
     # The server is authoritative. Groq reporting 9,000 requests already spent
     # must override a local counter that has only seen this run's handful.
+    # Groq states its own ceiling alongside the remainder, and both are read:
+    # deriving usage from the manifest's number instead is how two requests
+    # came to look like thirteen thousand before the probe corrected it.
     transport = RecordingTransport(
-        headers={"x-ratelimit-remaining-requests": "5400"}  # of 14,400
+        headers={
+            "x-ratelimit-limit-requests": "1000",
+            "x-ratelimit-remaining-requests": "940",
+        }
     )
     with open_store(tmp_path / "l.db") as store:
         scheduler, _ = _harness(manifest, store, transport)
         asyncio.run(scheduler.run(scheduler.plan()))
 
-        used = scheduler.governor.headroom()["groq/llama-3.3-70b"].requests_used
-        assert used == 14_400 - 5_400
+        used = scheduler.governor.headroom()["groq/gpt-oss-120b"].requests_used
+        assert used == 1_000 - 940
