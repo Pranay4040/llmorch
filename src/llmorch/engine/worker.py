@@ -67,10 +67,31 @@ class WorkerDeps:
     real requests tomorrow on the strength of imaginary ones."""
     run_id: str = ""
     purpose: str = "execute"
+    budget_growth_factor: float = 2.0
+    """How much more room a truncated attempt gets on its retry."""
+    max_budget_growths: int = 2
+    """Growth attempts before giving up and failing over. Two doublings reach
+    max_output from any sane starting estimate; more would just spend quota
+    rediscovering that the model is the problem."""
     admission_deadline_s: float = 45.0
     """How long a node may wait on a per-minute window before trying a
     different model. Sized just under the 60s window both providers use, so a
     wait that could clear does, and one that cannot gives way promptly."""
+
+
+def budget_for(node: TaskNode, model, boost: float = 1.0) -> int:
+    """max_tokens for one attempt.
+
+    The artifact estimate, doubled, plus whatever this model spends thinking
+    before it writes anything — then clamped to max_output, which the manifest
+    already holds under the provider's per-request ceiling.
+
+    `boost` is what a previous truncation buys. The node estimates in the task
+    graph are guesses, and a guess that is too low is indistinguishable from a
+    verbose model until the output comes back cut off.
+    """
+    wanted = max(256, node.est_output_tokens * 2) + model.reasoning_headroom
+    return min(model.max_output, int(wanted * boost))
 
 
 def build_prompt(node: TaskNode, blackboard: Blackboard) -> tuple[str, str]:
@@ -109,6 +130,8 @@ async def execute_node(
     tried_vendors: set[str] = set()
     current: str | None = model_id
     attempts_on_current = 0
+    boost = 1.0
+    grown = 0
 
     system, user = build_prompt(node, deps.blackboard)
 
@@ -120,7 +143,9 @@ async def execute_node(
         result.state = NodeState.RUNNING
 
         try:
-            response = await _call(node, current, system, user, deps, priority)
+            response = await _call(
+                node, current, system, user, deps, priority, boost
+            )
         except LLMOrchError as exc:
             health = deps.health.record_failure(current, exc)
             result.error = str(exc)
@@ -142,6 +167,7 @@ async def execute_node(
                 health=deps.health,
             )
             attempts_on_current = 0
+            boost, grown = 1.0, 0
             if current is not None:
                 result.state = NodeState.FALLBACK
             continue
@@ -171,6 +197,25 @@ async def execute_node(
             result.error = None
             result.vendors_tried = tuple(sorted(tried_vendors))
             return result
+
+        # Truncation with headroom still unspent is a budgeting failure, not a
+        # competence one. The node's est_output_tokens is a guess made before
+        # anyone saw the task, and a guess that is too low looks exactly like a
+        # verbose model — until the output comes back one rule short of
+        # complete, which is how the demo's stylesheet failed on both vendors
+        # at once. Asking the same model again with a bigger budget is the one
+        # retry that changes something, so it happens before failover and
+        # without counting against the model's health.
+        model = deps.manifest.model(current)
+        if (
+            response.truncated
+            and grown < deps.max_budget_growths
+            and budget_for(node, model, boost) < model.max_output
+        ):
+            grown += 1
+            boost *= deps.budget_growth_factor
+            result.error = "output truncated; retrying with a larger budget"
+            continue
 
         # Failed verification: treat it as this model's failure and move on.
         failure = Truncated("output truncated") if response.truncated else LLMOrchError(
@@ -204,6 +249,7 @@ async def _call(
     user: str,
     deps: WorkerDeps,
     priority: Priority,
+    boost: float = 1.0,
 ):
     """One governed provider call: reserve, send, reconcile."""
     provider_name = deps.manifest.vendor_of(model_id)
@@ -212,11 +258,7 @@ async def _call(
     est_prompt = deps.estimator.estimate_prompt(
         system=system, messages=[user], provider=provider_name
     )
-    # The artifact budget, plus whatever this model spends thinking first.
-    # Clamped to max_output, which is itself held under the provider's
-    # per-request ceiling by the manifest.
-    wanted = max(256, node.est_output_tokens * 2) + model.reasoning_headroom
-    max_tokens = min(model.max_output, wanted)
+    max_tokens = budget_for(node, model, boost)
 
     # Wait out a per-minute window rather than treating it as a refusal.
     # `acquire` raises the terminal verdicts straight through — UNSERVABLE,

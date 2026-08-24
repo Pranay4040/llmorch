@@ -19,6 +19,7 @@ from llmorch.engine.blackboard import Blackboard
 from llmorch.engine.graph import TaskGraph
 from llmorch.engine.materialize import materialize
 from llmorch.engine.scheduler import Scheduler
+from llmorch.engine.worker import budget_for
 from llmorch.providers.base import ProviderRegistry
 from llmorch.providers.mock import FaultMode, MockProvider
 from llmorch.quota.governor import Governor
@@ -349,3 +350,63 @@ def test_every_prompt_carries_the_shared_interface_contract(manifest):
     for node in build_nodes():
         _, user = build_prompt(node, board)
         assert "/api/notes" in user
+
+
+# ==========================================================================
+# Budget growth on truncation
+#
+# The one failure where the right response is to ask the SAME model again:
+# a truncated output with max_output still unspent means the estimate was too
+# small, not that the model is incapable. Failing over instead hands the same
+# under-budget to the next vendor, which truncates identically — which is
+# exactly how the demo's stylesheet degraded on both vendors at once.
+# ==========================================================================
+
+
+def test_budget_grows_before_failing_over(manifest):
+    node = build_nodes()[0]
+    model = manifest.model("groq/gpt-oss-120b")
+
+    first = budget_for(node, model, 1.0)
+    second = budget_for(node, model, 2.0)
+
+    assert second > first
+    assert second <= model.max_output, "growth must stay under the model's cap"
+
+
+def test_growth_is_clamped_to_max_output(manifest):
+    node = build_nodes()[0]
+    model = manifest.model("groq/gpt-oss-120b")
+    # Any boost, however large, stays inside what the provider can serve —
+    # exceeding it would make the request UNSERVABLE rather than merely big.
+    assert budget_for(node, model, 1000.0) == model.max_output
+
+
+def test_a_truncated_node_retries_the_same_model_with_more_room(manifest):
+    scheduler, graph, provider = _harness(
+        manifest,
+        faults={"style": FaultMode.TRUNCATED},
+        fail_times={"style": 1},
+    )
+    outcome = asyncio.run(scheduler.run(scheduler.plan()))
+
+    attempts = provider.calls_for("style")
+    assert len(attempts) >= 2
+    assert attempts[0] == attempts[1], (
+        "the retry should go to the same model with a bigger budget, "
+        "not straight to another vendor"
+    )
+    assert outcome.results["style"].state is NodeState.DONE
+
+
+def test_persistent_truncation_still_fails_over(manifest):
+    # Growth is bounded: a model that truncates whatever budget it is given is
+    # a competence problem after all, and the node must still reach another
+    # vendor rather than looping.
+    scheduler, graph, provider = _harness(
+        manifest, faults={"style": FaultMode.TRUNCATED}
+    )
+    asyncio.run(scheduler.run(scheduler.plan()))
+
+    vendors = {manifest.vendor_of(m) for m in provider.calls_for("style")}
+    assert len(vendors) >= 2, "it should have crossed vendors eventually"

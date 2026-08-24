@@ -1,7 +1,8 @@
 # llmorch — Project Blueprint & Status
 
 > Self-contained handoff. Everything needed to resume work with no prior context.
-> Last updated: Milestone 2 complete. Groq is verified live.
+> Last updated: Milestone 2 complete. Both vendors verified live, and a
+> full cross-vendor run produced a working app.
 
 ---
 
@@ -87,15 +88,22 @@ another **without the models ever talking to each other**.
 
 ## 4. Current status
 
-**Milestones 0, 1 and 2 are COMPLETE. 290 tests pass, 1 skipped** (symlink
+**Milestones 0, 1, 2 and 3 are COMPLETE. 301 tests pass, 1 skipped** (symlink
 test needs admin on Windows).
 
-`llmorch doctor --live --provider groq` has been run against the real API and
-all three Groq models answer. The probe was worth its four requests: **two of
-the three original wire names did not exist, and not one of the three published
-limits was correct.** See §5a.
+`llmorch doctor --live` passes on all four models across both vendors, and
+`llmorch run --live "build a notes app"` completes **6 of 6 nodes, 0 degraded**,
+at 74% quota efficiency. The generated app was started and exercised: POST
+creates a note, GET lists, detail fetches, `/` and `/style.css` serve.
 
-M3 is blocked only on `GEMINI_API_KEY`.
+**`server.py` was written by Gemini; the schema, both pages, the client script
+and the stylesheet by Groq models.** They interoperate correctly through the
+interface contract without the models ever exchanging a message — which is the
+thing this project exists to demonstrate.
+
+The wire-name probe was worth its four requests: **two of Groq's three original
+wire names did not exist, Gemini's did not either, and not one published limit
+was correct.** See §5a.
 
 Verified working end to end:
 
@@ -107,7 +115,7 @@ Splits work across 4 models / 2 vendors, writes `runs/<id>/output/`, and the
 generated app genuinely serves: POST creates a note, GET lists, detail fetches,
 `/` returns the page. All against mocks — zero network calls.
 
-### Verified live (Groq, 2026-08-24)
+### Verified live (2026-08-24)
 
 Read from real `x-ratelimit-*` response headers, not documentation:
 
@@ -116,6 +124,18 @@ Read from real `x-ratelimit-*` response headers, not documentation:
 | `groq/gpt-oss-120b` | `openai/gpt-oss-120b` | 1,000 | 8,000 |
 | `groq/gpt-oss-20b` | `openai/gpt-oss-20b` | 1,000 | 8,000 |
 | `groq/qwen3.6-27b` | `qwen/qwen3.6-27b` | 1,000 | 8,000 |
+| `gemini/3.6-flash` | `gemini-3.6-flash` | unknown | unknown |
+
+`gemini-2.5-flash` is still *listed* by the models endpoint but refused on a new
+key: "no longer available to new users." **Being listed is not proof of access
+— only a request is.** `gemini-3.7-flash` exists but timed out at 120s.
+
+Gemini's OpenAI-compatible endpoint returns **no `x-ratelimit-*` headers at
+all**, so its limits cannot be calibrated the way Groq's were. Its provider is
+marked `limits_are_estimated` and the published 2.5-flash free-tier figures are
+carried forward as a guess. Local counting is the only defence there, which is
+why its reserve is kept generous. It is also slow: ~13s to first response,
+against Groq's 130-770ms.
 
 Also on the account but **not enabled**, because their limits differ and the
 manifest declares limits per *provider* rather than per model:
@@ -293,7 +313,7 @@ Found during Milestone 2 — the first three only appear once real code runs:
 | M0 | Setup, secret hygiene | **DONE** | — |
 | M1 | Offline skeleton, zero API calls | **DONE** | — |
 | M2 | First real requests, **Groq only** | **DONE** | — |
-| M3 | Add Gemini; cross-vendor failover live | | GEMINI_API_KEY |
+| M3 | Add Gemini; cross-vendor failover live | **DONE** | — |
 | M3.5 | NVIDIA NIM + Mistral (adaptive limit discovery) | | those keys |
 | M4 | Negotiation live + Tier 1 cross-vendor review | | — |
 | M5 | Optimization; Perplexity behind --allow-paid | | — |
