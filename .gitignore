@@ -1,0 +1,46 @@
+# Secrets — never commit these
+.env
+.env.local
+*.key
+secrets/
+
+# Per-machine manifest overrides (account-specific limits)
+models.local.yaml
+
+# Run outputs — regenerated every run, disposable
+runs/
+
+# Local scratch space
+tmp/
+
+# Quota ledger / local state
+*.db
+*.db-wal
+*.db-shm
+
+# Learned model track record (machine-local)
+profiles.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+build/
+dist/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini

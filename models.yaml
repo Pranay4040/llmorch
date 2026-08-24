@@ -1,0 +1,229 @@
+# llmorch provider + model manifest
+#
+# These are operational facts about *this machine and account*, not code —
+# which is why they live in YAML. Per-machine overrides go in models.local.yaml
+# (gitignored), which is deep-merged over this file at load time.
+#
+# Wire names for providers other than Groq's llama-3.3-70b are unverified until
+# Milestone 2; `llmorch doctor` confirms each one with a single trivial call
+# before anything depends on it.
+
+version: 1
+
+# ===========================================================================
+# Providers
+# ===========================================================================
+
+providers:
+
+  # -------------------------------------------------------------------------
+  # Groq — the request workhorse.
+  # Abundant daily requests, but a brutally tight 6,000 tokens/minute ceiling
+  # that makes large-context calls permanently unservable rather than merely
+  # delayed. Short prompts and short outputs only.
+  # -------------------------------------------------------------------------
+  groq:
+    enabled: true
+    kind: openai_compat
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+    reset_tz: UTC
+    paid: false
+    limits:
+      # Org-scoped: extra API keys do not raise this.
+      - {kind: rpm, scope: account, value: 30}
+      - {kind: tpm, scope: model, value: 6000}
+      - {kind: rpd, scope: model, value: 14400, reserve: 200}
+
+  # -------------------------------------------------------------------------
+  # Gemini — the long-context specialist.
+  # 1M context and a generous per-minute token budget, but only 250 requests
+  # per day, making each request precious. Resets at PACIFIC midnight, not UTC.
+  # -------------------------------------------------------------------------
+  gemini:
+    enabled: true
+    kind: openai_compat
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    api_key_env: GEMINI_API_KEY
+    reset_tz: America/Los_Angeles
+    paid: false
+    limits:
+      - {kind: rpm, scope: model, value: 10}
+      - {kind: tpm, scope: model, value: 250000}
+      # reserve keeps 30 requests back for critical-path retries.
+      - {kind: rpd, scope: model, value: 250, reserve: 30}
+
+  # -------------------------------------------------------------------------
+  # NVIDIA NIM — M3.5. Documented but inactive.
+  # One key reaches 100+ models labelled by their real vendor, which is the
+  # best fit for genuine multi-company diversity. But NVIDIA publishes no
+  # official free-tier numbers, so these values are a conservative guess that
+  # the governor widens or tightens from observed headers and 429s.
+  # -------------------------------------------------------------------------
+  nvidia_nim:
+    enabled: false
+    kind: openai_compat
+    base_url: https://integrate.api.nvidia.com/v1
+    api_key_env: NVIDIA_NIM_API_KEY
+    reset_tz: UTC
+    paid: false
+    limits_are_estimated: true
+    limits:
+      - {kind: rpm, scope: account, value: 10}
+      - {kind: rpd, scope: account, value: 100, reserve: 10}
+
+  # -------------------------------------------------------------------------
+  # Mistral — M3.5. Documented but inactive.
+  # Huge monthly token volume but only ~1-2 requests/minute, so it can never
+  # carry latency-sensitive work. Free tier also trains on submitted prompts.
+  # -------------------------------------------------------------------------
+  mistral:
+    enabled: false
+    kind: openai_compat
+    base_url: https://api.mistral.ai/v1
+    api_key_env: MISTRAL_API_KEY
+    reset_tz: UTC
+    paid: false
+    trains_on_prompts: true
+    limits_are_estimated: true
+    limits:
+      - {kind: rpm, scope: account, value: 1}
+      - {kind: rpd, scope: account, value: 200, reserve: 10}
+
+  # -------------------------------------------------------------------------
+  # Perplexity — M5. PAID, and inactive by default.
+  # Priced per *request* ($5-14 per 1,000) on top of per-token cost, so the
+  # per-request fee dominates for short calls. Requires --allow-paid AND a
+  # non-zero budget before a single call is made.
+  # -------------------------------------------------------------------------
+  perplexity:
+    enabled: false
+    kind: openai_compat
+    base_url: https://api.perplexity.ai
+    api_key_env: PERPLEXITY_API_KEY
+    reset_tz: UTC
+    paid: true
+    cost:
+      input_per_mtok: 1.0
+      output_per_mtok: 1.0
+      per_request: 0.009
+    limits:
+      - {kind: requests_per_run, scope: account, value: 2}
+
+# ===========================================================================
+# Models
+#
+# role_affinity is the hand-written capability sheet the dispatcher reads.
+# Values are priors, refined over time by the learned track record in
+# profiles.json.
+# ===========================================================================
+
+models:
+
+  # --- Groq ----------------------------------------------------------------
+
+  # max_output is capped at 4096 rather than the model's true 8192 ceiling.
+  # Groq's 6,000 TPM allows ~5,400 tokens per request, so an 8,192-token output
+  # could never be served at all. 4096 leaves ~1,300 tokens for the prompt —
+  # which is why Groq nodes must stay small and why the interface contract is
+  # passed as a compact summary rather than pasted wholesale.
+  - id: groq/llama-3.3-70b
+    provider: groq
+    wire_name: llama-3.3-70b-versatile
+    context: 131072
+    max_output: 4096
+    quality_prior: 0.72
+    supports_json_schema: true
+    role_affinity:
+      planning: 0.55
+      research: 0.25      # no web access
+      backend: 0.70
+      frontend: 0.45
+      styling: 0.35
+      content: 0.50
+      review: 0.75        # strong critic
+      integration: 0.60
+
+  - id: groq/qwen3-32b
+    provider: groq
+    wire_name: qwen3-32b
+    context: 131072
+    max_output: 4096      # capped by Groq's 6,000 TPM, not by the model
+    quality_prior: 0.68
+    supports_json_schema: true
+    role_affinity:
+      planning: 0.45
+      research: 0.20
+      backend: 0.65
+      frontend: 0.62      # noticeably better at markup than Llama
+      styling: 0.60
+      content: 0.45
+      review: 0.60
+      integration: 0.55
+
+  - id: groq/gpt-oss-120b
+    provider: groq
+    wire_name: openai/gpt-oss-120b
+    context: 131072
+    max_output: 4096      # capped by Groq's 6,000 TPM, not by the model
+    quality_prior: 0.74
+    supports_json_schema: true
+    role_affinity:
+      planning: 0.65
+      research: 0.30
+      backend: 0.68
+      frontend: 0.58
+      styling: 0.50
+      content: 0.60
+      review: 0.70
+      integration: 0.62
+
+  # --- Gemini --------------------------------------------------------------
+
+  - id: gemini/2.5-flash
+    provider: gemini
+    wire_name: gemini-2.5-flash
+    context: 1048576
+    max_output: 65536
+    quality_prior: 0.80
+    supports_json_schema: true
+    role_affinity:
+      planning: 0.85      # the natural decomposer: huge context
+      research: 0.90      # search grounding
+      backend: 0.70
+      frontend: 0.72
+      styling: 0.65
+      content: 0.80
+      review: 0.70
+      integration: 0.75
+
+# ===========================================================================
+# Role fallback chains
+#
+# Order is preference order. Validated at load: every chain must span at least
+# two distinct vendors, because failure modes correlate within a vendor — a
+# third attempt at the same vendor tends to fail exactly as the first two did.
+# ===========================================================================
+
+roles:
+  planning:    [gemini/2.5-flash, groq/gpt-oss-120b, groq/llama-3.3-70b]
+  research:    [gemini/2.5-flash, groq/gpt-oss-120b]
+  backend:     [groq/llama-3.3-70b, gemini/2.5-flash, groq/gpt-oss-120b]
+  frontend:    [gemini/2.5-flash, groq/qwen3-32b, groq/llama-3.3-70b]
+  styling:     [groq/qwen3-32b, gemini/2.5-flash]
+  content:     [gemini/2.5-flash, groq/gpt-oss-120b]
+  review:      [groq/llama-3.3-70b, gemini/2.5-flash, groq/gpt-oss-120b]
+  integration: [gemini/2.5-flash, groq/gpt-oss-120b, groq/llama-3.3-70b]
+
+# ===========================================================================
+# Defaults
+# ===========================================================================
+
+defaults:
+  # Fraction of a provider's TPM that any single request may occupy. Requests
+  # above this are UNSERVABLE on that model — waiting can never make them fit.
+  max_request_tokens_ratio: 0.9
+
+  # Reviews go to whichever chain rung is cheapest in daily requests, which in
+  # practice means Groq (14,400/day) rather than Gemini (250/day).
+  review_prefers_provider: groq
