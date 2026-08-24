@@ -27,6 +27,36 @@ _CODE_LANGS = {
 }
 
 
+# Reasoning some models emit *inline in the message content* rather than in a
+# separate field. qwen3.6 on Groq does exactly this, and reports
+# reasoning_tokens=0 while doing it, so the monologue is invisible to
+# accounting and arrives as if it were the artifact.
+_THINK = re.compile(
+    r"<(think|thinking|reasoning)\b[^>]*>.*?</\1\s*>", re.DOTALL | re.IGNORECASE
+)
+
+# An unclosed opener means generation stopped mid-thought: everything from the
+# tag onward is monologue, and there is no artifact after it to keep.
+_THINK_UNCLOSED = re.compile(
+    r"<(think|thinking|reasoning)\b[^>]*>.*\Z", re.DOTALL | re.IGNORECASE
+)
+
+
+def strip_reasoning(text: str) -> str:
+    """Remove inline reasoning blocks.
+
+    Runs before fence extraction and before verification, so a model that
+    thinks out loud is judged on what it actually produced. Without this, every
+    artifact such a model writes opens with its own deliberation — and a
+    Tier 0 syntax check on `<think>` fails a file that was otherwise fine.
+    """
+    if not text or "<" not in text:
+        return text
+    cleaned = _THINK.sub("", text)
+    cleaned = _THINK_UNCLOSED.sub("", cleaned)
+    return cleaned.strip()
+
+
 def strip_fences(text: str) -> str:
     """Return the contents of the first fenced block, or the text unchanged.
 

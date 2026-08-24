@@ -293,7 +293,7 @@ def test_oversized_nodes_are_not_assigned_to_a_model_that_cannot_serve_them(mani
         sleep=_no_sleep,
     )
     plan = scheduler.plan()
-    assert plan.model_for("huge") == "gemini/2.5-flash"
+    assert plan.model_for("huge") == "gemini/3.6-flash"
 
 
 # ==========================================================================

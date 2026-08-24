@@ -33,6 +33,11 @@ class ModelHealth(str, Enum):
     """Tripped the circuit breaker — a genuine fault."""
     EXHAUSTED = "exhausted"
     """Out of quota for today. Not a fault; excluded without penalty."""
+    UNCONFIGURED = "unconfigured"
+    """No usable provider — typically a missing API key. Not a fault either,
+    and known before the run starts, so it should never be discovered by
+    calling. Kept distinct from EXHAUSTED so `llmorch quota` does not report a
+    model as out of quota when it was never reachable."""
 
 
 @dataclass(slots=True)
@@ -98,6 +103,17 @@ class HealthTracker:
 
     def mark_exhausted(self, model_id: str) -> None:
         self._status[model_id] = ModelHealth.EXHAUSTED
+
+    def mark_unconfigured(self, model_id: str, reason: str = "") -> None:
+        """Take a model out of every chain before the run starts.
+
+        The fallback chains come from the manifest, which knows nothing about
+        which keys are present. Without this, a keyless model stays a valid
+        rung: the planner is told to avoid it, then failover routes straight
+        back to it and each node discovers the missing key separately.
+        """
+        self._status[model_id] = ModelHealth.UNCONFIGURED
+        self.events.append(f"{model_id}: {reason or 'no provider configured'}")
 
     # -- querying ---------------------------------------------------------
 

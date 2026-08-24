@@ -224,7 +224,7 @@ def test_base_url_with_a_trailing_slash_does_not_double_up():
         api_key="k",
         transport=transport,
     )
-    _chat(provider, _request(model_id="gemini/2.5-flash"))
+    _chat(provider, _request(model_id="gemini/3.6-flash"))
     assert seen["url"].endswith("/v1beta/openai/chat/completions")
     assert "//chat" not in seen["url"]
 
@@ -385,4 +385,4 @@ def test_build_provider_maps_every_model_id_to_its_wire_name():
     assert provider.wire_name("groq/gpt-oss-120b") == "openai/gpt-oss-120b"
     assert provider.wire_name("groq/qwen3.6-27b") == "qwen/qwen3.6-27b"
     # Gemini's models belong to a different adapter instance.
-    assert "gemini/2.5-flash" not in provider.wire_names
+    assert "gemini/3.6-flash" not in provider.wire_names

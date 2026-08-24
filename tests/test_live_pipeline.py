@@ -151,7 +151,7 @@ def test_every_request_carries_the_vendors_wire_name(manifest, tmp_path):
 
     sent = {r["model"] for r in transport.requests}
     assert sent, "no requests were made"
-    assert sent <= {*GROQ_MODELS, "gemini-2.5-flash"}
+    assert sent <= {*GROQ_MODELS, "gemini-3.6-flash"}
     assert not any(m.startswith("groq/") for m in sent), "ids leaked onto the wire"
 
 

@@ -18,7 +18,7 @@ from llmorch.types import Bid, OutputKind, Role, TaskNode
 
 GROQ = "groq/gpt-oss-120b"
 QWEN = "groq/qwen3.6-27b"
-GEMINI = "gemini/2.5-flash"
+GEMINI = "gemini/3.6-flash"
 
 
 @pytest.fixture(scope="module")

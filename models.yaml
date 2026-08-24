@@ -52,8 +52,15 @@ providers:
 
   # -------------------------------------------------------------------------
   # Gemini — the long-context specialist.
-  # 1M context and a generous per-minute token budget, but only 250 requests
-  # per day, making each request precious. Resets at PACIFIC midnight, not UTC.
+  # 1M context and a generous per-minute token budget, but few requests per
+  # day, making each one precious. Resets at PACIFIC midnight, not UTC.
+  #
+  # These limits are ESTIMATED and cannot currently be checked: Gemini's
+  # OpenAI-compatible endpoint returns no x-ratelimit-* headers whatsoever
+  # (verified 2026-08-24), so unlike Groq there is nothing to calibrate
+  # against. The figures below are the published 2.5-flash free tier carried
+  # forward to 3.6-flash, which is a guess. The governor's local counting is
+  # the only defence here, which is why the reserve is kept generous.
   # -------------------------------------------------------------------------
   gemini:
     enabled: true
@@ -62,6 +69,7 @@ providers:
     api_key_env: GEMINI_API_KEY
     reset_tz: America/Los_Angeles
     paid: false
+    limits_are_estimated: true
     limits:
       - {kind: rpm, scope: model, value: 10}
       - {kind: tpm, scope: model, value: 250000}
@@ -153,6 +161,10 @@ models:
     max_output: 4096
     quality_prior: 0.74
     supports_json_schema: true
+    # Measured: a probe with max_tokens=16 returned an empty string and 14
+    # reasoning tokens. gpt-oss reports reasoning separately, so it is visible
+    # in usage, but it is spent before any artifact appears either way.
+    reasoning_headroom: 700
     role_affinity:
       planning: 0.65
       research: 0.30
@@ -173,6 +185,7 @@ models:
     max_output: 4096
     quality_prior: 0.62
     supports_json_schema: true
+    reasoning_headroom: 700
     role_affinity:
       planning: 0.50
       research: 0.25
@@ -198,6 +211,12 @@ models:
     max_output: 4096
     quality_prior: 0.68
     supports_json_schema: true
+    # The largest allowance in the roster, and it is not padding. Asked for a
+    # stylesheet with 900 tokens, this model produced 900 tokens of <think>
+    # and half a CSS rule — three times in one live run, which tripped its
+    # circuit breaker and degraded the node. Its monologue is also invisible
+    # to accounting: Groq reports reasoning_tokens=0 while it happens.
+    reasoning_headroom: 1500
     role_affinity:
       planning: 0.45
       research: 0.20
@@ -210,13 +229,26 @@ models:
 
   # --- Gemini --------------------------------------------------------------
 
-  - id: gemini/2.5-flash
+  # gemini-2.5-flash is still listed by the models endpoint but is refused on
+  # a new key: "no longer available to new users. Please update to
+  # models/gemini-3.6-flash". Being listed is not proof of access — only a
+  # request is, which is what `llmorch doctor --live` exists to make.
+  #
+  # gemini-3.7-flash exists but timed out at 120s on the probe; 3.6-flash is
+  # what the API itself recommended, and it answers. Deliberately pinned to a
+  # version rather than the `gemini-flash-latest` alias: the track record in
+  # profiles.json is keyed by model id, and an alias would silently change what
+  # that history describes.
+  - id: gemini/3.6-flash
     provider: gemini
-    wire_name: gemini-2.5-flash
+    wire_name: gemini-3.6-flash
     context: 1048576
     max_output: 65536
     quality_prior: 0.80
     supports_json_schema: true
+    # Unmeasured — Gemini reports no reasoning tokens and sends no headers.
+    # Modest allowance on the assumption 3.x thinks before answering.
+    reasoning_headroom: 1000
     role_affinity:
       planning: 0.85      # the natural decomposer: huge context
       research: 0.90      # search grounding
@@ -236,14 +268,14 @@ models:
 # ===========================================================================
 
 roles:
-  planning:    [gemini/2.5-flash, groq/gpt-oss-120b, groq/gpt-oss-20b]
-  research:    [gemini/2.5-flash, groq/gpt-oss-120b]
-  backend:     [groq/gpt-oss-120b, gemini/2.5-flash, groq/qwen3.6-27b]
-  frontend:    [gemini/2.5-flash, groq/qwen3.6-27b, groq/gpt-oss-120b]
-  styling:     [groq/qwen3.6-27b, gemini/2.5-flash]
-  content:     [gemini/2.5-flash, groq/gpt-oss-120b]
-  review:      [groq/gpt-oss-120b, gemini/2.5-flash, groq/qwen3.6-27b]
-  integration: [gemini/2.5-flash, groq/gpt-oss-120b, groq/qwen3.6-27b]
+  planning:    [gemini/3.6-flash, groq/gpt-oss-120b, groq/gpt-oss-20b]
+  research:    [gemini/3.6-flash, groq/gpt-oss-120b]
+  backend:     [groq/gpt-oss-120b, gemini/3.6-flash, groq/qwen3.6-27b]
+  frontend:    [gemini/3.6-flash, groq/qwen3.6-27b, groq/gpt-oss-120b]
+  styling:     [groq/qwen3.6-27b, gemini/3.6-flash]
+  content:     [gemini/3.6-flash, groq/gpt-oss-120b]
+  review:      [groq/gpt-oss-120b, gemini/3.6-flash, groq/qwen3.6-27b]
+  integration: [gemini/3.6-flash, groq/gpt-oss-120b, groq/qwen3.6-27b]
 
 # ===========================================================================
 # Defaults

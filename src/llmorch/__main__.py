@@ -30,6 +30,7 @@ from .config import (
 from .demo.website import ARTIFACTS, INTERFACE, SUMMARIES, TASK, build_nodes
 from .engine.blackboard import Blackboard
 from .engine.graph import TaskGraph
+from .engine.health import HealthTracker
 from .engine.materialize import materialize
 from .engine.scheduler import Scheduler
 from .errors import LLMOrchError, ProviderError
@@ -125,6 +126,21 @@ def _setup(args) -> tuple:
     manifest = load_manifest()
     live = bool(getattr(args, "live", False))
 
+    # Build the registry first when live: a model whose provider has no key
+    # cannot be called, so it must be kept out of the candidate set before the
+    # planner ever scores it. Otherwise the plan assigns work to it and the
+    # run discovers the gap at call time, one node at a time.
+    store: LedgerStore | None = None
+    notes: list[str] = []
+    excluded: set[str] = set()
+    if live:
+        registry, notes = _live_registry(manifest)
+        mock = None
+        excluded = {m.id for m in manifest.enabled_models if m.id not in registry}
+        notes += [f"{m} has no key — excluded from planning" for m in sorted(excluded)]
+    else:
+        registry, mock = _mock_registry(manifest)
+
     config = RunConfig(
         task=args.task or TASK,
         run_id=_run_id(),
@@ -134,6 +150,7 @@ def _setup(args) -> tuple:
         review=getattr(args, "review", "code"),
         max_nodes=getattr(args, "max_nodes", 10),
         max_concurrency=getattr(args, "concurrency", 4),
+        excluded_models=frozenset(excluded),
     )
 
     graph = TaskGraph.build(build_nodes())
@@ -148,15 +165,20 @@ def _setup(args) -> tuple:
 
     blackboard = Blackboard(interface=INTERFACE)
 
-    store: LedgerStore | None = None
-    notes: list[str] = []
     if live:
-        registry, notes = _live_registry(manifest)
-        mock = None
         store = LedgerStore()
         _restore_governor(governor, store)
-    else:
-        registry, mock = _mock_registry(manifest)
+        notes += [
+            f"ledger holds {m}, which models.yaml no longer declares — ignored"
+            for m in governor.unknown_restored
+        ]
+
+    # Excluding a model from planning is not enough: the failover chains come
+    # straight from the manifest, so a keyless model stays a valid rung and
+    # every node rediscovers the missing key on its own.
+    health = HealthTracker(threshold=config.circuit_breaker_threshold)
+    for model_id in sorted(excluded):
+        health.mark_unconfigured(model_id, "no API key — excluded for this run")
 
     scheduler = Scheduler(
         graph,
@@ -165,6 +187,7 @@ def _setup(args) -> tuple:
         registry,
         config=config,
         blackboard=blackboard,
+        health=health,
         store=store,
     )
     return manifest, config, graph, governor, scheduler, mock, store, notes

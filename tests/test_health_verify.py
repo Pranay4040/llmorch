@@ -12,6 +12,7 @@ from llmorch.engine.health import (
     next_model,
     should_retry_same_model,
 )
+from llmorch.engine.salvage import extract_code, strip_reasoning
 from llmorch.engine.verify import (
     check_placeholder,
     check_python,
@@ -33,7 +34,7 @@ from llmorch.types import OutputKind, Role, Verdict
 
 GROQ = "groq/gpt-oss-120b"
 QWEN = "groq/qwen3.6-27b"
-GEMINI = "gemini/2.5-flash"
+GEMINI = "gemini/3.6-flash"
 
 
 @pytest.fixture(scope="module")
@@ -361,3 +362,81 @@ def test_review_fields_are_length_capped():
         {"verdict": "pass", "issues": [{"what": "x" * 5000}]}, QWEN
     )
     assert len(result.issues[0].what) <= 500
+
+
+# ==========================================================================
+# Inline reasoning
+#
+# Some models put their deliberation in the message body rather than a
+# separate field. qwen3.6 on Groq does exactly this, and reports
+# reasoning_tokens=0 while doing it, so it is invisible to accounting and
+# arrives looking like the artifact.
+# ==========================================================================
+
+
+def test_reasoning_block_is_stripped_from_the_artifact():
+    text = "<think>\nI should use flexbox here.\n</think>\nbody { color: red; }"
+    assert strip_reasoning(text) == "body { color: red; }"
+
+
+def test_stripping_is_case_insensitive_and_handles_attributes():
+    assert strip_reasoning("<THINK>x</THINK>a{b:c}") == "a{b:c}"
+    assert strip_reasoning('<think id="1">x</think>a{b:c}') == "a{b:c}"
+
+
+def test_an_unclosed_reasoning_block_leaves_nothing_behind():
+    # Generation stopped mid-thought: there is no artifact after it to keep,
+    # and returning the monologue would write it to disk as a file.
+    assert strip_reasoning("<think>\nstill deciding how to") == ""
+
+
+def test_text_without_reasoning_is_untouched():
+    css = "body { color: red; }"
+    assert strip_reasoning(css) == css
+    assert strip_reasoning("a{b:c} <!-- comment -->") == "a{b:c} <!-- comment -->"
+
+
+def test_the_monologue_would_otherwise_be_written_to_disk():
+    """The concrete harm — and note that verification does not catch it.
+
+    Tier 0 accepts this response, because it does contain a valid rule block.
+    So nothing flags it, and the file written to disk opens with the model
+    thinking out loud. A stylesheet beginning with `<think>` is not a
+    stylesheet, which is why stripping happens before the artifact is taken
+    rather than being left to the verifier.
+    """
+    spoken = "<think>\nplanning\n</think>\nbody { color: red; }"
+    assert verify_tier0(
+        spoken, output_path="style.css", output_kind=OutputKind.CODE
+    ).ok is True, "verification alone does not catch this"
+
+    assert "<think>" in extract_code(spoken)
+    assert extract_code(strip_reasoning(spoken)) == "body { color: red; }"
+
+
+# ==========================================================================
+# Models that cannot be called at all
+# ==========================================================================
+
+
+def test_an_unconfigured_model_leaves_every_fallback_chain():
+    """Excluding a model from *planning* is not enough.
+
+    The chains come from the manifest, which knows nothing about which keys are
+    present. Without marking it here, the planner avoids the model and failover
+    routes straight back to it, so every node rediscovers the missing key
+    separately — as one live run did, burning two attempts per node on it.
+    """
+    health = HealthTracker()
+    health.mark_unconfigured(GEMINI, "no API key")
+
+    assert health.is_available(GEMINI) is False
+    assert GEMINI not in failover_chain(load_manifest(), Role.FRONTEND, health=health)
+
+
+def test_unconfigured_is_not_counted_as_broken():
+    # It never failed — it was never reachable. Reporting it as unhealthy would
+    # blame a model for a missing key.
+    health = HealthTracker()
+    health.mark_unconfigured(GEMINI, "no API key")
+    assert health.unhealthy_models == []

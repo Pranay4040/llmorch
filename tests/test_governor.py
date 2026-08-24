@@ -28,7 +28,7 @@ from llmorch.registry.manifest import load_manifest
 from llmorch.types import Admission, Priority, RateLimitSnapshot, Ticket, Usage
 
 GROQ = "groq/gpt-oss-120b"
-GEMINI = "gemini/2.5-flash"
+GEMINI = "gemini/3.6-flash"
 
 
 @pytest.fixture

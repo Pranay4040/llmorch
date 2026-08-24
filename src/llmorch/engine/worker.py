@@ -17,6 +17,7 @@ from decimal import Decimal
 
 from ..errors import (
     LLMOrchError,
+    NoHealthyModel,
     RateLimited,
     Truncated,
 )
@@ -36,7 +37,7 @@ from ..types import (
 )
 from .blackboard import Blackboard
 from .health import HealthTracker, backoff_seconds, next_model, should_retry_same_model
-from .salvage import extract_code
+from .salvage import extract_code, strip_reasoning
 from .verify import verify_tier0
 
 SYSTEM_PROMPT = """\
@@ -148,9 +149,13 @@ async def execute_node(
         # Verify before accepting. Tier 0 is free and catches the common
         # free-model failures without an LLM ever being asked.
         result.state = NodeState.VERIFYING
-        artifact = extract_code(response.text)
+        # Strip inline reasoning before either step looks at the text: some
+        # models put their deliberation in the message body, and both the
+        # artifact and the syntax check must see the file, not the monologue.
+        spoken = strip_reasoning(response.text)
+        artifact = extract_code(spoken)
         verdict = verify_tier0(
-            response.text,
+            spoken,
             output_path=node.output_path,
             output_kind=node.output_kind,
             truncated_flag=response.truncated,
@@ -207,7 +212,11 @@ async def _call(
     est_prompt = deps.estimator.estimate_prompt(
         system=system, messages=[user], provider=provider_name
     )
-    max_tokens = min(model.max_output, max(256, node.est_output_tokens * 2))
+    # The artifact budget, plus whatever this model spends thinking first.
+    # Clamped to max_output, which is itself held under the provider's
+    # per-request ceiling by the manifest.
+    wanted = max(256, node.est_output_tokens * 2) + model.reasoning_headroom
+    max_tokens = min(model.max_output, wanted)
 
     # Wait out a per-minute window rather than treating it as a refusal.
     # `acquire` raises the terminal verdicts straight through — UNSERVABLE,
@@ -224,7 +233,17 @@ async def _call(
         deadline_s=deps.admission_deadline_s,
     )
 
-    provider = deps.registry.get(model_id)
+    try:
+        provider = deps.registry.get(model_id)
+    except KeyError as exc:
+        # No adapter for this model — a missing key, or a manifest that names a
+        # provider the run never wired up. The registry raises a bare KeyError,
+        # which would sail past every `except LLMOrchError` in the failover
+        # ladder and take the whole run with it. Convert it, so the node fails
+        # over like any other and the run survives.
+        deps.governor.release(ticket, "no provider registered")
+        raise NoHealthyModel(f"no provider is registered for {model_id}") from exc
+
     request = ChatRequest(
         model_id=model_id,
         messages=(Message("user", user),),

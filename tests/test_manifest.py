@@ -64,7 +64,7 @@ def test_gemini_reserves_headroom_for_critical_path_retries(manifest):
 
 def test_capability_sheet_matches_the_intended_split(manifest):
     """Research should favour Gemini; backend should favour a Groq model."""
-    gemini = manifest.model("gemini/2.5-flash")
+    gemini = manifest.model("gemini/3.6-flash")
     llama = manifest.model("groq/gpt-oss-120b")
 
     assert gemini.affinity(Role.RESEARCH) > llama.affinity(Role.RESEARCH)
@@ -81,7 +81,7 @@ def test_max_request_tokens_is_the_tighter_of_context_and_tpm(manifest):
     # Groq: 131k context but an 8k TPM ceiling -> TPM wins.
     assert manifest.max_request_tokens("groq/gpt-oss-120b") == 7200
     # Gemini: 250k TPM against a 1M context -> context is not the limit.
-    assert manifest.max_request_tokens("gemini/2.5-flash") == 225000
+    assert manifest.max_request_tokens("gemini/3.6-flash") == 225000
 
 
 def test_unknown_model_lookup_raises(manifest):

@@ -22,7 +22,7 @@ from llmorch.types import LimitKind, LimitScope, Usage
 
 GROQ = "groq/gpt-oss-120b"
 QWEN = "groq/qwen3.6-27b"
-GEMINI = "gemini/2.5-flash"
+GEMINI = "gemini/3.6-flash"
 
 # Deliberately late in the UTC day and *still the previous day* in Pacific:
 # 06:00 UTC on the 2nd is 23:00 on the 1st in Los Angeles. Any code that

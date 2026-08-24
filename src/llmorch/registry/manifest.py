@@ -110,6 +110,16 @@ class ModelSpec(BaseModel):
     max_output: int = Field(gt=0)
     quality_prior: float = Field(default=0.5, ge=0.0, le=1.0)
     supports_json_schema: bool = True
+    reasoning_headroom: int = Field(default=0, ge=0)
+    """Tokens this model spends thinking before it emits any artifact.
+
+    Added to max_tokens rather than folded into the artifact estimate, because
+    it is a property of the model, not of the task. Set it to zero and a
+    reasoning model spends the whole budget deliberating and gets cut off
+    mid-file: qwen3.6 given 900 tokens for a stylesheet produced 900 tokens of
+    monologue and half a CSS rule, three times in one run, which tripped its
+    circuit breaker and degraded the node.
+    """
     role_affinity: dict[Role, float] = Field(default_factory=dict)
 
     @field_validator("role_affinity")
