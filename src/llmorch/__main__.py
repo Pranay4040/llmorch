@@ -179,7 +179,23 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _force_utf8_console() -> None:
+    """Windows consoles default to cp1252, which cannot encode the box glyphs
+    and em dashes the report tables use — printing one raises mid-render and
+    kills the run. Reconfiguring is cheap and a no-op where stdout is already
+    UTF-8; `errors="replace"` keeps a redirected pipe from ever taking us down.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass  # detached or already-wrapped stream; render as-is
+
+
 def main(argv: list[str] | None = None) -> int:
+    _force_utf8_console()
     load_dotenv()
     args = build_parser().parse_args(argv)
     try:
