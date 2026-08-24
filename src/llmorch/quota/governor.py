@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -49,10 +50,20 @@ _ticket_ids = itertools.count(1)
 
 @dataclass(slots=True)
 class _LimitState:
-    """Live state for one (provider, scope-key, limit) triple."""
+    """Live state for one (provider, scope-key) bucket.
 
-    rpm: SlidingWindow = field(default_factory=lambda: SlidingWindow(60.0))
-    tpm: SlidingWindow = field(default_factory=lambda: SlidingWindow(60.0))
+    A counter is present only when a limit of that kind is declared *at this
+    bucket's scope*. That is the whole point of the type: a provider that mixes
+    scopes — Groq counts requests per account but tokens per model — needs its
+    account bucket to hold requests and its model buckets to hold tokens, and
+    nothing else. Give every bucket every counter and both halves go wrong at
+    once: the account bucket sums three models' tokens against a per-model
+    ceiling, and the model buckets each track requests against a cap the
+    account shares.
+    """
+
+    rpm: SlidingWindow | None = None
+    tpm: SlidingWindow | None = None
     rpd: DayCounter | None = None
     tpd: DayCounter | None = None
     cooldown_until: float | None = None
@@ -98,23 +109,40 @@ class Governor:
             return f"{provider_name}:*"
         return f"{provider_name}:{model_id}"
 
-    def _state(self, key: str, provider: ProviderSpec) -> _LimitState:
+    def _state(
+        self, key: str, provider: ProviderSpec, scope: LimitScope
+    ) -> _LimitState:
+        """Get or create one bucket, carrying only the limits at its scope."""
         state = self._states.get(key)
         if state is None:
             state = _LimitState()
-            if provider.limit(LimitKind.RPD):
-                state.rpd = DayCounter(provider.reset_tz)
-            if provider.limit(LimitKind.TPD):
-                state.tpd = DayCounter(provider.reset_tz)
+            for kind in (LimitKind.RPM, LimitKind.TPM, LimitKind.RPD, LimitKind.TPD):
+                spec = provider.limit(kind)
+                if spec is None or spec.scope is not scope:
+                    continue
+                match kind:
+                    case LimitKind.RPM:
+                        state.rpm = SlidingWindow(60.0)
+                    case LimitKind.TPM:
+                        state.tpm = SlidingWindow(60.0)
+                    case LimitKind.RPD:
+                        state.rpd = DayCounter(provider.reset_tz)
+                    case LimitKind.TPD:
+                        state.tpd = DayCounter(provider.reset_tz)
             self._states[key] = state
         return state
 
     def _states_for(self, model_id: str) -> list[tuple[_LimitState, ProviderSpec]]:
-        """Every limit bucket a request against this model draws from."""
+        """Every limit bucket a request against this model draws from.
+
+        One bucket per distinct scope the provider declares. Because each holds
+        only its own scope's counters, callers can act on whatever is present
+        without re-checking which scope it came from.
+        """
         provider = self.manifest.provider_of(model_id)
         scopes = {lim.scope for lim in provider.limits} or {LimitScope.MODEL}
         return [
-            (self._state(self._key(provider.name, model_id, s), provider), provider)
+            (self._state(self._key(provider.name, model_id, s), provider, s), provider)
             for s in scopes
         ]
 
@@ -213,7 +241,7 @@ class Governor:
                     )
 
             rpm_spec = prov.limit(LimitKind.RPM)
-            if rpm_spec:
+            if rpm_spec and state.rpm is not None:
                 wait = state.rpm.seconds_until_room(now_m, 1, rpm_spec.value)
                 if wait is None:
                     return Denial(
@@ -223,7 +251,7 @@ class Governor:
                     waits.append(wait)
 
             tpm_spec = prov.limit(LimitKind.TPM)
-            if tpm_spec:
+            if tpm_spec and state.tpm is not None:
                 wait = state.tpm.seconds_until_room(
                     now_m, reserve_tokens, tpm_spec.value
                 )
@@ -258,8 +286,10 @@ class Governor:
             priority=priority,
         )
         for state, _ in self._states_for(model_id):
-            state.rpm.add(now_m, 1)
-            state.tpm.add(now_m, reserve_tokens)
+            if state.rpm is not None:
+                state.rpm.add(now_m, 1)
+            if state.tpm is not None:
+                state.tpm.add(now_m, reserve_tokens)
             if state.rpd is not None:
                 state.rpd.add(now_w, 1)
             if state.tpd is not None:
@@ -317,7 +347,8 @@ class Governor:
         actual = usage.total_tokens
         delta = actual - ticket.reserved_tokens
         for state, _ in self._states_for(ticket.model_id):
-            state.tpm.adjust_last(delta)
+            if state.tpm is not None:
+                state.tpm.adjust_last(delta)
             if state.tpd is not None:
                 if delta >= 0:
                     state.tpd.add(self.clock.now_utc(), delta)
@@ -333,8 +364,10 @@ class Governor:
         was never actually spent.
         """
         for state, _ in self._states_for(ticket.model_id):
-            state.rpm.remove(1)
-            state.tpm.remove(ticket.reserved_tokens)
+            if state.rpm is not None:
+                state.rpm.remove(1)
+            if state.tpm is not None:
+                state.tpm.remove(ticket.reserved_tokens)
             if state.rpd is not None:
                 state.rpd.remove(1)
             if state.tpd is not None:
@@ -342,6 +375,45 @@ class Governor:
         provider = self.manifest.provider_of(ticket.model_id).name
         self._run_requests[provider] = max(0, self._run_requests.get(provider, 1) - 1)
         self._tickets.pop(ticket.ticket_id, None)
+
+    # -- durable state ----------------------------------------------------
+
+    def restore_daily(self, usage_by_model: Mapping[str, tuple[int, int]]) -> None:
+        """Seed the day counters from the ledger, at process start.
+
+        Counters live in memory but daily caps outlive the process that hit
+        them. Without this, a second run on the same day starts believing it
+        holds Gemini's full 250 requests, walks into the wall the first run
+        already found, and spends several of the few survivors discovering it.
+
+        Totals are aggregated *per state bucket* rather than applied per model,
+        because an account-scoped limit is one counter shared by every model on
+        that provider. Setting it once per model would multiply the usage by
+        the number of models and bench a provider that has barely been touched.
+        """
+        now = self.clock.now_utc()
+        totals: dict[str, tuple[int, int]] = {}
+
+        for model_id, (requests, tokens) in usage_by_model.items():
+            provider = self.manifest.provider_of(model_id)
+            scopes = {lim.scope for lim in provider.limits} or {LimitScope.MODEL}
+            for scope in scopes:
+                key = self._key(provider.name, model_id, scope)
+                self._state(key, provider, scope)  # ensure the bucket exists
+                seen_requests, seen_tokens = totals.get(key, (0, 0))
+                totals[key] = (seen_requests + requests, seen_tokens + tokens)
+
+        for key, (requests, tokens) in totals.items():
+            state = self._states[key]
+            if state.rpd is not None:
+                state.rpd.set_count(now, requests)
+            if state.tpd is not None:
+                state.tpd.set_count(now, tokens)
+
+    def reset_timezones(self) -> dict[str, str]:
+        """`{provider: reset_tz}` — what the ledger needs to ask each provider
+        about its own quota day rather than a shared one."""
+        return {name: spec.reset_tz for name, spec in self.manifest.providers.items()}
 
     # -- server truth -----------------------------------------------------
 
@@ -407,7 +479,8 @@ class Governor:
                 if state.rpd is not None:
                     requests_used = max(requests_used, state.rpd.current(now_w))
                     seconds_to_reset = state.rpd.seconds_until_reset(now_w)
-                tokens_minute = max(tokens_minute, state.tpm.current(now_m))
+                if state.tpm is not None:
+                    tokens_minute = max(tokens_minute, state.tpm.current(now_m))
 
             out[model.id] = Headroom(
                 model_id=model.id,

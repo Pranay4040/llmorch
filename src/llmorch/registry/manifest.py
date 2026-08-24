@@ -71,6 +71,24 @@ class ProviderSpec(BaseModel):
     def limit(self, kind: LimitKind) -> LimitSpec | None:
         return next((lim for lim in self.limits if lim.kind is kind), None)
 
+    def cost_for(self, prompt_tokens: int, completion_tokens: int) -> Decimal:
+        """Money owed for one request.
+
+        `per_request` is added whole, and it is not a rounding detail:
+        Perplexity charges $5–14 per 1,000 calls *on top of* tokens, which for
+        requests as short as these is the larger half of the bill. A cost model
+        counting only tokens would under-report it severalfold.
+
+        Free providers declare no cost and return exactly zero, so callers never
+        have to branch on `paid`.
+        """
+        million = Decimal(1_000_000)
+        return (
+            self.cost.input_per_mtok * Decimal(prompt_tokens) / million
+            + self.cost.output_per_mtok * Decimal(completion_tokens) / million
+            + self.cost.per_request
+        )
+
     @property
     def max_request_tokens(self) -> int | None:
         """Largest single request this provider can ever serve.
