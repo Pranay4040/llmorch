@@ -1,7 +1,8 @@
 # llmorch — Project Blueprint & Status
 
 > Self-contained handoff. Everything needed to resume work with no prior context.
-> Last updated: end of Milestone 1.
+> Last updated: Milestone 2 built and verified offline; the live wire-name
+> probe has not yet been run.
 
 ---
 
@@ -87,8 +88,15 @@ another **without the models ever talking to each other**.
 
 ## 4. Current status
 
-**Milestones 0 and 1 are COMPLETE. 210 tests pass, 1 skipped** (symlink test
-needs admin on Windows).
+**Milestones 0 and 1 are COMPLETE. M2 is built and green offline — 288 tests
+pass, 1 skipped** (symlink test needs admin on Windows).
+
+The one part of M2 still outstanding needs the network: `llmorch doctor --live`
+has not been run, so the Groq wire names in models.yaml remain unverified.
+Everything else in M2 — the adapter, header parsing, the ledger, live wiring —
+is exercised end to end against a canned HTTP transport in
+`tests/test_live_pipeline.py`, which runs the real adapter and the real ledger
+with only the socket faked.
 
 Verified working end to end:
 
@@ -118,11 +126,11 @@ generated app genuinely serves: POST creates a note, GET lists, detail fetches,
 | `quota/windows.py` | done | SlidingWindow, DayCounter, injectable Clock |
 | `quota/estimator.py` | done | Char-based + per-provider EWMA self-calibration |
 | `quota/governor.py` | done | **The core.** Admission control |
-| `quota/store.py` | **NOT BUILT** | SQLite ledger — M2 |
+| `quota/store.py` | done | SQLite ledger + `build_event`; counters derived from events |
 | `providers/base.py` | done | Provider protocol + registry |
 | `providers/mock.py` | done | Canned responses + fault injection |
-| `providers/openai_compat.py` | **NOT BUILT** | M2 |
-| `providers/headers.py` | **NOT BUILT** | M2 |
+| `providers/openai_compat.py` | done | stdlib HTTP, injectable transport |
+| `providers/headers.py` | done | Durations, Retry-After, per-minute vs daily 429 |
 | `engine/graph.py` | done | Kahn levels, cycle repair, budget pruning |
 | `engine/salvage.py` | done | Fence stripping, balanced-JSON recovery |
 | `engine/verify.py` | done (Tier 0) | Tier 1 review designed, wired at M4 |
@@ -140,11 +148,11 @@ generated app genuinely serves: POST creates a note, GET lists, detail fetches,
 | `negotiate/profiles.py` | **NOT BUILT** | M4 |
 | `negotiate/plancache.py` | **NOT BUILT** | M4 |
 | `report/render.py` | done | plan/outcome/spend/quota tables |
-| `report/ledger.py` | **NOT BUILT** | M2, with store.py |
+| `report/ledger.py` | done | run history, today, lifetime totals, run detail |
 | `demo/website.py` | done | Notes-app DAG + real working canned artifacts |
-| `__main__.py` | done | `run`, `plan`, `quota` |
+| `__main__.py` | done | `run [--live]`, `plan`, `quota`, `ledger`, `doctor [--live]` |
 
-### Tests (210 passing)
+### Tests (288 passing)
 
 | File | Covers |
 |---|---|
@@ -155,6 +163,9 @@ generated app genuinely serves: POST creates a note, GET lists, detail fetches,
 | `test_reconcile.py` | graph + dispatcher + bid normalization |
 | `test_health_verify.py` | failover, circuit breaker, Tier 0 checks |
 | `test_integration.py` | full pipeline, fault injection, degradation |
+| `test_providers.py` | header parsing + adapter status/usage mapping |
+| `test_store.py` | ledger round-trip, day boundaries, restore, limit scope |
+| `test_live_pipeline.py` | the live path end to end, with only the socket faked |
 
 ---
 
@@ -174,6 +185,31 @@ Each would have cost live quota to discover — the reason for building offline 
 3. **check_css passed unparseable Python as valid CSS.** Bracket-balance alone
    accepts it (zero braces is balanced). Worse, the wrongly-successful node
    *reset the circuit breaker's failure streak*. Now requires at least one rule block.
+
+Found during Milestone 2 — the first three only appear once real code runs:
+
+4. **Every scope bucket got every counter.** Each limit was therefore enforced
+   at whichever scope it was *not* declared at. Groq's per-model 14,400/day and
+   6,000 TPM were shared across all three models (five calls to llama made qwen
+   report five requests used), while account-scoped RPM was additionally
+   tracked per model. A bucket now holds only the counters its own scope owns.
+
+5. **A WAIT verdict was raised as QuotaExhausted**, which benches a model for
+   the whole run — the mirror image of the UNSERVABLE-is-not-WAIT invariant.
+   Against Groq's account-scoped 30 RPM, the first fan-out benched the entire
+   roster and every remaining node degraded. The worker now waits on the window;
+   a wait that outlasts the caller's patience raises `QuotaBusy`, which leaves
+   the model healthy and in the chains.
+
+6. **Provider 429s tripped the circuit breaker.** Two in a row removed a model
+   from every later chain. A 429 is the provider enforcing a quota, not a model
+   returning garbage — and the breaker exists only to judge the latter. Daily
+   429s still bench the model, which is the real distinction.
+
+7. **`llmorch run` crashed on a default Windows console.** The report tables
+   print em dashes and box glyphs; cp1252 stdout cannot encode them, so the run
+   died mid-render before writing anything. It had only ever been run in a
+   UTF-8 terminal. stdout/stderr are now reconfigured at entry.
 
 ---
 
@@ -220,16 +256,24 @@ Each would have cost live quota to discover — the reason for building offline 
 
 ### M2 specifics (the immediate next step)
 
-Build `providers/openai_compat.py`, `providers/headers.py`, `quota/store.py`,
-`report/ledger.py`, and an `llmorch doctor` command.
+All of it is built: `providers/openai_compat.py`, `providers/headers.py`,
+`quota/store.py`, `report/ledger.py`, and `llmorch doctor`.
 
 Groq first **deliberately**: 14,400 requests/day makes it the safe place to
 debug header parsing and counter sync.
 
-**Unverified:** the Groq wire names in models.yaml
-(`llama-3.3-70b-versatile`, `qwen3-32b`, `openai/gpt-oss-120b`) have not been
-checked against the live API. `llmorch doctor` should confirm each with one
-trivial call before anything depends on them.
+**Still unverified — the one remaining M2 step.** The Groq wire names in
+models.yaml (`llama-3.3-70b-versatile`, `qwen3-32b`, `openai/gpt-oss-120b`)
+have never been checked against the live API, and a wrong one fails exactly
+like a dead model: mid-run, after quota has been spent on its neighbours.
+
+```bash
+llmorch doctor --live --provider groq
+```
+
+One trivial call per model (3 requests of Groq's 14,400/day) settles it. A
+`GROQ_API_KEY` is present in the environment — not in `.env` — so this is
+runnable now. `GEMINI_API_KEY` is still unset, which leaves M3 blocked.
 
 ### Decisions already made (do not re-litigate)
 
