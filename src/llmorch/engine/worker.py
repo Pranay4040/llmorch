@@ -13,13 +13,12 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from decimal import Decimal
 
 from ..errors import (
     LLMOrchError,
-    QuotaExhausted,
     RateLimited,
     Truncated,
-    Unservable,
 )
 from ..quota.estimator import TokenEstimator
 from ..quota.governor import Governor
@@ -32,6 +31,7 @@ from ..types import (
     Priority,
     RateLimitSnapshot,
     TaskNode,
+    Usage,
     Verdict,
 )
 from .blackboard import Blackboard
@@ -60,6 +60,16 @@ class WorkerDeps:
     max_retries: int = 2
     sleep: object = asyncio.sleep
     """Injectable so tests do not actually wait out a backoff."""
+    store: object | None = None
+    """LedgerStore, when the run is live. None on a dry run — the mock spends
+    no real quota, and recording its traffic would have the governor refuse
+    real requests tomorrow on the strength of imaginary ones."""
+    run_id: str = ""
+    purpose: str = "execute"
+    admission_deadline_s: float = 45.0
+    """How long a node may wait on a per-minute window before trying a
+    different model. Sized just under the 60s window both providers use, so a
+    wait that could clear does, and one that cannot gives way promptly."""
 
 
 def build_prompt(node: TaskNode, blackboard: Blackboard) -> tuple[str, str]:
@@ -199,15 +209,20 @@ async def _call(
     )
     max_tokens = min(model.max_output, max(256, node.est_output_tokens * 2))
 
-    ticket = deps.governor.try_acquire(
-        model_id, est_prompt, max_tokens, priority=priority
+    # Wait out a per-minute window rather than treating it as a refusal.
+    # `acquire` raises the terminal verdicts straight through — UNSERVABLE,
+    # EXHAUSTED_TODAY, COST_BLOCKED — so those still fail over immediately,
+    # and only WAIT is actually slept on. Converting WAIT into a refusal (as
+    # this once did) benches a healthy model for the whole run over a pause of
+    # a few seconds, which against an account-scoped 30 RPM ceiling means the
+    # entire roster is benched moments into the first fan-out.
+    ticket = await deps.governor.acquire(
+        model_id,
+        est_prompt,
+        max_tokens,
+        priority=priority,
+        deadline_s=deps.admission_deadline_s,
     )
-    if not hasattr(ticket, "ticket_id"):
-        # A Denial. Terminal refusals are raised so the caller fails over
-        # rather than sleeping on something that will never clear.
-        if ticket.verdict.value == "unservable":
-            raise Unservable(ticket.reason)
-        raise QuotaExhausted(ticket.reason)
 
     provider = deps.registry.get(model_id)
     request = ChatRequest(
@@ -225,18 +240,84 @@ async def _call(
             model_id,
             RateLimitSnapshot(retry_after_s=exc.retry_after_s, daily_limit_hit=exc.daily),
         )
+        _record(deps, node, model_id, ticket, exc)
         raise
-    except LLMOrchError:
+    except LLMOrchError as exc:
         # Never reached the provider, or failed in transit: refund the
         # reservation so a transport blip does not permanently cost quota.
         deps.governor.release(ticket, "call failed")
+        _record(deps, node, model_id, ticket, exc)
         raise
 
-    deps.governor.commit(ticket, response.usage)
+    cost = deps.manifest.provider_of(model_id).cost_for(
+        response.usage.prompt_tokens, response.usage.completion_tokens
+    )
+    deps.governor.commit(ticket, response.usage, cost)
     deps.estimator.observe(provider_name, response.usage.prompt_tokens, est_prompt)
     if response.rate_limit:
         deps.governor.sync_from_headers(model_id, response.rate_limit)
+    _record(deps, node, model_id, ticket, None, response=response, cost=cost)
     return response
+
+
+def _record(
+    deps: WorkerDeps,
+    node: TaskNode,
+    model_id: str,
+    ticket,
+    error: Exception | None,
+    *,
+    response=None,
+    cost=None,
+) -> None:
+    """Append this call to the durable ledger, when there is one.
+
+    Failures are recorded too, but only the ones that actually reached the
+    provider: a rejected request still consumed a slot with the rate limiter,
+    whereas a connection that never opened consumed nothing and would inflate
+    tomorrow's picture of today. `ProviderError.status` is what separates them
+    — it is set only once a server answered.
+
+    Ledger writes never propagate. A disk problem is a reporting failure, and
+    losing the run over it would throw away every artifact already built.
+    """
+    if deps.store is None:
+        return
+
+    reached_provider = error is None or getattr(error, "status", None) is not None
+    if not reached_provider:
+        return
+
+    from ..quota.store import build_event  # local: keeps the engine import-light
+
+    provider = deps.manifest.provider_of(model_id)
+    usage = response.usage if response is not None else Usage()
+
+    try:
+        deps.store.record(
+            build_event(
+                run_id=deps.run_id,
+                node_id=node.id,
+                purpose=deps.purpose,
+                provider=provider.name,
+                model_id=model_id,
+                reset_tz=provider.reset_tz,
+                est_prompt_tokens=ticket.est_prompt_tokens,
+                est_completion_tokens=ticket.est_completion_tokens,
+                usage=usage,
+                cost_usd=cost if cost is not None else Decimal("0"),
+                ok=error is None,
+                http_status=(
+                    response.raw_status
+                    if response is not None
+                    else int(getattr(error, "status", 0) or 0)
+                ),
+                latency_ms=response.latency_ms if response is not None else 0,
+                error=None if error is None else str(error)[:500],
+            )
+        )
+    except Exception:  # pragma: no cover - reporting must never fail a run
+        pass
 
 
 def _summarise(node: TaskNode, artifact: str) -> str:

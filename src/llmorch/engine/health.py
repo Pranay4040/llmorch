@@ -22,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
-from ..errors import LLMOrchError, QuotaExhausted, Unservable
+from ..errors import LLMOrchError, QuotaBusy, QuotaExhausted, RateLimited, Unservable
 from ..registry.manifest import Manifest
 from ..types import Role
 
@@ -60,6 +60,19 @@ class HealthTracker:
             self._status[model_id] = ModelHealth.EXHAUSTED
             self.events.append(f"{model_id}: out of quota for today")
             return ModelHealth.EXHAUSTED
+
+        if isinstance(error, QuotaBusy) or (
+            isinstance(error, RateLimited) and not error.daily
+        ):
+            # Rate limited this moment, not spent for the day, and not broken.
+            # The node moves on to another model, but this one stays healthy
+            # and eligible: benching it surrenders working capacity to a pause
+            # of seconds. A 429 is the provider enforcing a quota, which the
+            # circuit breaker explicitly does not judge — it exists to catch
+            # models returning garbage, not models being asked too quickly.
+            # (A *daily* 429 is different, and the worker marks it exhausted.)
+            self.events.append(f"{model_id}: rate limited, trying another model")
+            return self._status.get(model_id, ModelHealth.HEALTHY)
 
         if isinstance(error, Unservable):
             # A sizing mismatch, not a defect. The node was routed to a model
@@ -186,7 +199,9 @@ def should_retry_same_model(error: Exception, attempts: int, max_retries: int) -
         return False
     if not isinstance(error, LLMOrchError):
         return False
-    if isinstance(error, (QuotaExhausted, Unservable)):
+    if isinstance(error, (QuotaExhausted, Unservable, QuotaBusy)):
+        # Admission already waited as long as it was willing to; sleeping again
+        # on the same model just repeats that wait.
         return False
     return error.is_retryable and type(error).__name__ in (
         "TransportError",

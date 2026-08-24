@@ -55,6 +55,20 @@ class QuotaExhausted(QuotaError):
     is_retryable = False
 
 
+class QuotaBusy(QuotaError):
+    """Rate limited right now, but the window will clear on its own.
+
+    Distinct from `QuotaExhausted` deliberately, and for the same reason the
+    governor separates WAIT from EXHAUSTED_TODAY: a model that is merely busy
+    is healthy. It keeps its place in every later fallback chain and takes no
+    track-record penalty. Collapsing the two benches a working model for the
+    rest of the run over a pause of a few seconds — and against an
+    account-scoped 30 RPM limit, that happens seconds into the first fan-out.
+    """
+
+    is_retryable = True
+
+
 class Unservable(QuotaError):
     """The request is larger than the model's per-minute token ceiling.
 

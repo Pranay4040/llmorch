@@ -14,6 +14,7 @@ boundaries would never reset at all.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -23,7 +24,14 @@ from zoneinfo import ZoneInfo
 
 
 class Clock(Protocol):
-    """Time source. Real in production, controllable in tests."""
+    """Time source. Real in production, controllable in tests.
+
+    A clock owns the *passage* of time as well as its reading, which is why
+    `sleep` lives here rather than being called directly. Anything that waits
+    on a rate-limit window has to wait on the same clock it measures the window
+    with: sleeping on the real clock while reading a fake one never advances
+    toward the deadline, and the waiter spins forever.
+    """
 
     def monotonic(self) -> float:
         """Seconds from an arbitrary origin; never decreases."""
@@ -33,6 +41,10 @@ class Clock(Protocol):
         """Timezone-aware wall clock in UTC."""
         ...
 
+    async def sleep(self, seconds: float) -> None:
+        """Wait, advancing this clock by `seconds`."""
+        ...
+
 
 class SystemClock:
     def monotonic(self) -> float:
@@ -40,6 +52,9 @@ class SystemClock:
 
     def now_utc(self) -> datetime:
         return datetime.now(timezone.utc)
+
+    async def sleep(self, seconds: float) -> None:
+        await asyncio.sleep(seconds)
 
 
 @dataclass(slots=True)
@@ -60,6 +75,15 @@ class FakeClock:
     def advance(self, seconds: float) -> None:
         self._monotonic += seconds
         self._now += timedelta(seconds=seconds)
+
+    async def sleep(self, seconds: float) -> None:
+        """Advance instead of waiting.
+
+        This is what makes a rate-limit wait testable: the governor's admission
+        loop sleeps and re-checks, and here that loop converges immediately
+        while still exercising every branch it would take in production.
+        """
+        self.advance(seconds)
 
     def set_utc(self, moment: datetime) -> None:
         """Jump wall time without touching monotonic time.

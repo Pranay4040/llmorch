@@ -63,6 +63,7 @@ class Scheduler:
         estimator: TokenEstimator | None = None,
         health: HealthTracker | None = None,
         sleep=asyncio.sleep,
+        store=None,
     ) -> None:
         self.graph = graph
         self.manifest = manifest
@@ -75,6 +76,10 @@ class Scheduler:
             threshold=config.circuit_breaker_threshold
         )
         self.sleep = sleep
+        self.store = store
+        """LedgerStore on a live run, None on a dry one. Mock traffic must not
+        reach the ledger: the governor would refuse tomorrow's real requests on
+        the strength of quota that was never spent."""
 
     # -- assignment -------------------------------------------------------
 
@@ -135,6 +140,8 @@ class Scheduler:
             blackboard=self.blackboard,
             max_retries=self.config.max_retries,
             sleep=self.sleep,
+            store=self.store,
+            run_id=self.config.run_id,
         )
 
         semaphore = asyncio.Semaphore(self.config.max_concurrency)

@@ -8,12 +8,14 @@ has to be pinned down offline.
 
 from __future__ import annotations
 
+import asyncio
+
 from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
 
-from llmorch.errors import CostBlocked, QuotaExhausted, Unservable
+from llmorch.errors import CostBlocked, QuotaBusy, QuotaExhausted, Unservable
 from llmorch.quota.governor import Governor
 from llmorch.quota.windows import (
     DayCounter,
@@ -380,3 +382,61 @@ def test_wait_time_probe_does_not_consume_quota(gov):
     before = gov.headroom()[GROQ].requests_used
     gov.wait_time(GROQ, 100)
     assert gov.headroom()[GROQ].requests_used == before
+
+
+# ==========================================================================
+# Waiting versus refusing
+#
+# The governor already separates WAIT from EXHAUSTED_TODAY. These pin down the
+# behaviour that has to follow from it: a model that is merely busy stays a
+# candidate, and only the caller's patience is finite.
+# ==========================================================================
+
+
+def test_acquire_waits_out_a_per_minute_window_rather_than_refusing(clock, gov):
+    # Fill the account-scoped 30 RPM window, then ask again. The request is
+    # granted once the window rolls, not refused.
+    for _ in range(30):
+        _grant(gov, GROQ, 10, 10)
+    assert gov.try_acquire(GROQ, 10, 10).verdict is Admission.WAIT
+
+    ticket = asyncio.run(gov.acquire(GROQ, 10, 10, deadline_s=120))
+
+    assert isinstance(ticket, Ticket)
+    assert clock.monotonic() > 0, "it should have waited for the window"
+
+
+def test_a_wait_past_the_deadline_is_busy_not_exhausted(gov):
+    """The distinction that keeps a healthy model in the chains.
+
+    Exceeding the caller's patience says nothing about the model's daily
+    allowance. Raising QuotaExhausted here — as this once did — marks the model
+    spent for the whole run, so an account-scoped 30 RPM ceiling benches the
+    entire roster moments into the first fan-out.
+    """
+    for _ in range(30):
+        _grant(gov, GROQ, 10, 10)
+
+    with pytest.raises(QuotaBusy):
+        asyncio.run(gov.acquire(GROQ, 10, 10, deadline_s=0.5))
+
+
+def test_a_busy_model_is_still_retryable(gov):
+    for _ in range(30):
+        _grant(gov, GROQ, 10, 10)
+
+    try:
+        asyncio.run(gov.acquire(GROQ, 10, 10, deadline_s=0.5))
+    except QuotaBusy as exc:
+        # Unlike QuotaExhausted and Unservable, this one can succeed later.
+        assert exc.is_retryable is True
+
+
+def test_an_exhausted_day_is_raised_immediately_not_waited_on(gov, clock):
+    # Waiting for a daily reset would stall the run for hours; the caller needs
+    # to fail over now.
+    gov.note_daily_exhausted(GEMINI)
+
+    with pytest.raises(QuotaExhausted):
+        asyncio.run(gov.acquire(GEMINI, 10, 10, deadline_s=120))
+    assert clock.monotonic() == 0, "it must not have slept"

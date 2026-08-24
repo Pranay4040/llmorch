@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 
-from ..errors import CostBlocked, QuotaExhausted, Unservable
+from ..errors import CostBlocked, QuotaBusy, QuotaExhausted, Unservable
 from ..registry.manifest import Manifest, ProviderSpec
 from ..types import (
     Admission,
@@ -83,9 +83,14 @@ class Governor:
         max_usd: Decimal = Decimal("0"),
         allow_paid: bool = False,
         safety_factor: float = 1.25,
+        sleep=None,
     ) -> None:
         self.manifest = manifest
         self.clock = clock or SystemClock()
+        self.sleep = sleep or self.clock.sleep
+        """Waiting happens on the same clock the windows are measured with.
+        Sleeping on the real clock while reading a fake one would never advance
+        toward the deadline, and admission would spin forever."""
         self.max_usd = max_usd
         self.allow_paid = allow_paid
         self.safety_factor = safety_factor
@@ -332,11 +337,13 @@ class Governor:
             wait = result.retry_after_s or 1.0
             elapsed = self.clock.monotonic() - start
             if deadline_s is not None and elapsed + wait > deadline_s:
-                raise QuotaExhausted(
+                # Busy, not spent. The caller should try a different model now,
+                # but this one stays healthy and eligible for later nodes.
+                raise QuotaBusy(
                     f"{model_id} would need {wait:.1f}s, past the "
                     f"{deadline_s:.1f}s deadline: {result.reason}"
                 )
-            await asyncio.sleep(wait)
+            await self.sleep(wait)
 
     # -- settlement -------------------------------------------------------
 
