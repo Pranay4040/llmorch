@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llmorch"
+version = "0.1.0"
+description = "Quota governance for multi-provider LLM applications, and an orchestrator built on it"
+readme = "README.md"
+keywords = ["llm", "rate-limit", "quota", "openai-compatible", "orchestration"]
+requires-python = ">=3.11"
+dependencies = [
+    "PyYAML>=6.0",
+    "pydantic>=2.7",
+    # Windows ships no timezone database; zoneinfo needs this for Gemini's
+    # Pacific-midnight quota reset. Not optional on this platform.
+    "tzdata>=2024.1",
+]
+
+[project.optional-dependencies]
+# No provider SDKs. Every endpoint in the roster speaks the OpenAI wire format,
+# and `providers/openai_compat.py` calls it over stdlib urllib. The SDKs each
+# ship their own retry and rate-limit machinery, which would sit *underneath*
+# the governor and retry requests it never admitted — and admission control
+# only works if every call goes through it.
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+llmorch = "llmorch.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

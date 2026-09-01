@@ -1,0 +1,373 @@
+# llmorch provider + model manifest
+#
+# These are operational facts about *this machine and account*, not code —
+# which is why they live in YAML. Per-machine overrides go in models.local.yaml
+# (gitignored), which is deep-merged over this file at load time.
+#
+# Every wire name below was confirmed against the live API with
+# `llmorch doctor --probe` on 2026-09-01. Groq's limits come from its own
+# response headers, not from documentation — the headers are the account's
+# actual numbers and the published ones were wrong by an order of magnitude.
+
+version: 1
+
+# ===========================================================================
+# Providers
+# ===========================================================================
+
+providers:
+
+  # -------------------------------------------------------------------------
+  # Groq — the fast lane, and tighter than it looks.
+  #
+  # These numbers are read from x-ratelimit-* headers on this account, not from
+  # the docs: 1,000 requests/day and 8,000 tokens/minute. The published figures
+  # (14,400/day, 6,000 TPM) were wrong in both directions, which is precisely
+  # why headers are treated as fact and local counting only as inference.
+  #
+  # The request bucket is a leaky one: reset-requests comes back as ~86.4s per
+  # request consumed, i.e. 86400/1000. So daily exhaustion reports a reset
+  # hours away, which is what the daily-vs-burst heuristic keys off.
+  # -------------------------------------------------------------------------
+  groq:
+    enabled: true
+    kind: openai_compat
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+    reset_tz: UTC
+    paid: false
+    limits:
+      # Org-scoped: extra API keys do not raise this.
+      - {kind: rpm, scope: account, value: 30}
+      # Verified from x-ratelimit-limit-tokens.
+      - {kind: tpm, scope: model, value: 8000}
+      # Verified from x-ratelimit-limit-requests. 5% held back for
+      # critical-path retries.
+      - {kind: rpd, scope: model, value: 1000, reserve: 50}
+
+  # -------------------------------------------------------------------------
+  # Gemini — the long-context specialist.
+  # 1M context and a generous per-minute token budget, but only 250 requests
+  # per day, making each request precious. Resets at PACIFIC midnight, not UTC.
+  # -------------------------------------------------------------------------
+  gemini:
+    enabled: true
+    kind: openai_compat
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    api_key_env: GEMINI_API_KEY
+    reset_tz: America/Los_Angeles
+    paid: false
+    limits:
+      # Observed live on 2026-09-01: a 429 from gemini-3.6-flash names the
+      # metric and its value outright —
+      #   "Quota exceeded for metric: generate_content_free_tier_requests,
+      #    limit: 20, model: gemini-3.6-flash. Please retry in 12.39s"
+      # Twelve seconds means this is the per-minute bucket, not the daily one.
+      # Kept a little under the stated 20 because the account is shared with
+      # whatever else uses this key.
+      - {kind: rpm, scope: model, value: 16}
+      - {kind: tpm, scope: model, value: 250000}
+      # UNVERIFIED. 250 is the published figure for gemini-2.5-flash; the
+      # daily cap for the 3.x models has never announced itself, because the
+      # per-minute bucket is reached first every time. Treat as a guess.
+      - {kind: rpd, scope: model, value: 250, reserve: 30}
+
+  # -------------------------------------------------------------------------
+  # OpenRouter — the roster's third vendor, and the only key of the nine spare
+  # ones that turned out to be usable.
+  #
+  # It fronts many companies behind one OpenAI-compatible endpoint, and its
+  # `:free` models genuinely cost nothing: `GET /models` reports `prompt: 0`
+  # for each, and the key reports `is_free_tier: true` with zero usage. Only
+  # `:free` wire names are declared below — a paid one would be a real charge.
+  #
+  # Limits are estimated. The key endpoint's rate_limit field is documented as
+  # deprecated, no rate-limit headers come back on completions, and the
+  # published free-tier figures depend on credits this account does not have.
+  # So these are deliberately low, and the governor will learn the truth from
+  # the first 429 that states a wait.
+  # -------------------------------------------------------------------------
+  openrouter:
+    enabled: true
+    kind: openai_compat
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    reset_tz: UTC
+    paid: false
+    limits_are_estimated: true
+    limits:
+      - {kind: rpm, scope: account, value: 15}
+      - {kind: rpd, scope: account, value: 50, reserve: 5}
+
+  # -------------------------------------------------------------------------
+  # NVIDIA NIM — inactive, and now known to be unusable on this account.
+  # `GET /models` lists 82 models across ten companies (Meta, Mistral, IBM,
+  # Writer, DeepSeek, Microsoft, Moonshot, OpenAI, Google, 01-ai) — exactly the
+  # diversity this project wanted — but every completion returns
+  # "Function ... Not found for account". A model list is what the platform
+  # serves, not what the key may call. Same story for Cerebras: /models
+  # answered, completions returned "Payment required".
+  # One key reaches 100+ models labelled by their real vendor, which is the
+  # best fit for genuine multi-company diversity. But NVIDIA publishes no
+  # official free-tier numbers, so these values are a conservative guess that
+  # the governor widens or tightens from observed headers and 429s.
+  # -------------------------------------------------------------------------
+  nvidia_nim:
+    enabled: false
+    kind: openai_compat
+    base_url: https://integrate.api.nvidia.com/v1
+    api_key_env: NVIDIA_NIM_API_KEY
+    reset_tz: UTC
+    paid: false
+    limits_are_estimated: true
+    limits:
+      - {kind: rpm, scope: account, value: 10}
+      - {kind: rpd, scope: account, value: 100, reserve: 10}
+
+  # -------------------------------------------------------------------------
+  # Mistral — M3.5. Documented but inactive.
+  # Huge monthly token volume but only ~1-2 requests/minute, so it can never
+  # carry latency-sensitive work. Free tier also trains on submitted prompts.
+  # -------------------------------------------------------------------------
+  mistral:
+    enabled: false
+    kind: openai_compat
+    base_url: https://api.mistral.ai/v1
+    api_key_env: MISTRAL_API_KEY
+    reset_tz: UTC
+    paid: false
+    trains_on_prompts: true
+    limits_are_estimated: true
+    limits:
+      - {kind: rpm, scope: account, value: 1}
+      - {kind: rpd, scope: account, value: 200, reserve: 10}
+
+  # -------------------------------------------------------------------------
+  # Perplexity — M5. PAID, and inactive by default.
+  # Priced per *request* ($5-14 per 1,000) on top of per-token cost, so the
+  # per-request fee dominates for short calls. Requires --allow-paid AND a
+  # non-zero budget before a single call is made.
+  # -------------------------------------------------------------------------
+  perplexity:
+    enabled: false
+    kind: openai_compat
+    base_url: https://api.perplexity.ai
+    api_key_env: PERPLEXITY_API_KEY
+    reset_tz: UTC
+    paid: true
+    cost:
+      input_per_mtok: 1.0
+      output_per_mtok: 1.0
+      per_request: 0.009
+    limits:
+      - {kind: requests_per_run, scope: account, value: 2}
+
+# ===========================================================================
+# Models
+#
+# role_affinity is the hand-written capability sheet the dispatcher reads.
+# Values are priors, refined over time by the learned track record in
+# profiles.json.
+# ===========================================================================
+
+models:
+
+  # --- Groq ----------------------------------------------------------------
+
+  # This account serves no Meta chat model — the only meta-llama/* entries are
+  # prompt-guard classifiers. The roster below is what `GET /v1/models`
+  # actually returns, verified one call each. Vendor diversity within Groq is
+  # therefore OpenAI (open-weights) and Alibaba, not Meta.
+  #
+  # max_output is capped at 4096 against a ~7,200-token request ceiling
+  # (0.9 x 8,000 TPM), leaving ~3,100 tokens for the prompt. Groq nodes must
+  # still stay small, which is why the interface contract is passed as a
+  # compact summary rather than pasted wholesale.
+  #
+  # Also available and verified, held back to keep the roster tight:
+  #   openai/gpt-oss-safeguard-20b, groq/compound, groq/compound-mini
+  #   (compound has built-in web search — the obvious candidate the day a
+  #   research node needs a second vendor), allam-2-7b, whisper-*, orpheus-*.
+
+  - id: groq/gpt-oss-120b
+    provider: groq
+    wire_name: openai/gpt-oss-120b
+    context: 131072
+    max_output: 4096
+    quality_prior: 0.74
+    supports_json_schema: true
+    role_affinity:
+      planning: 0.65
+      research: 0.30      # no web access
+      backend: 0.68
+      frontend: 0.58
+      styling: 0.50
+      content: 0.60
+      review: 0.70
+      integration: 0.62
+
+  - id: groq/gpt-oss-20b
+    provider: groq
+    wire_name: openai/gpt-oss-20b
+    context: 131072
+    max_output: 4096
+    quality_prior: 0.62
+    supports_json_schema: true
+    # Emits reasoning tokens even on a one-word reply, and those are billed and
+    # rate-limited like any other output — so it is cheapest on small, well
+    # specified work rather than open-ended prose.
+    role_affinity:
+      planning: 0.45
+      research: 0.20
+      backend: 0.58
+      frontend: 0.52
+      styling: 0.55
+      content: 0.45
+      review: 0.55
+      integration: 0.50
+
+  - id: groq/qwen3-27b
+    provider: groq
+    wire_name: qwen/qwen3.8-27b
+    context: 131072
+    max_output: 4096
+    quality_prior: 0.68
+    supports_json_schema: true
+    role_affinity:
+      planning: 0.45
+      research: 0.20
+      backend: 0.65
+      frontend: 0.62      # noticeably better at markup than the gpt-oss pair
+      styling: 0.60
+      content: 0.45
+      review: 0.60
+      integration: 0.55
+
+  # --- Gemini --------------------------------------------------------------
+
+  # Verified 2026-09-01. Two facts drove the choice of model and settings:
+  #
+  # 1. This endpoint charges *thinking* tokens against max_tokens but does not
+  #    report them in usage. At max_tokens=900 the reply came back
+  #    finish_reason=length with 36 visible tokens — the thinking had eaten the
+  #    entire budget. At 8,000 the same prompt returned 9,734 characters and
+  #    finish_reason=stop. Hence min_output_tokens.
+  # 2. `reasoning_effort: none` and `google.thinking_config` are both rejected
+  #    (HTTP 400), so thinking cannot be switched off here — only budgeted for.
+  #
+  # Costs nothing real: tokens are *reserved* at 8,000 and reconciled to actual
+  # usage at commit, and 8,000 against a 250,000 TPM window is noise.
+  - id: gemini/3.6-flash
+    provider: gemini
+    wire_name: gemini-3.6-flash
+    context: 1048576
+    max_output: 65536
+    min_output_tokens: 8000
+    quality_prior: 0.80
+    supports_json_schema: true
+    role_affinity:
+      planning: 0.85      # the natural decomposer: huge context
+      research: 0.90      # search grounding
+      backend: 0.70
+      frontend: 0.72
+      styling: 0.65
+      content: 0.80
+      review: 0.70
+      integration: 0.75
+
+  # --- OpenRouter (free tier only) ------------------------------------------
+
+  # Each of these answered a live probe on 2026-09-01. Four others in the free
+  # list did not and are deliberately absent: z-ai/glm-5.2 and
+  # google/gemma-4-31b-it returned upstream provider errors, nemotron-3-super
+  # returned no choices at all, and thinkingmachines/inkling is gated to a tier
+  # this key does not have.
+  #
+  # quality_prior is a placeholder for all three. Nothing here has a track
+  # record yet, and guessing one would be inventing evidence — profiles.json
+  # will replace these with what actually happens, per (model, role).
+
+  - id: openrouter/minimax-m3
+    provider: openrouter
+    wire_name: minimax/minimax-m3:free
+    context: 1048576
+    max_output: 8192
+    quality_prior: 0.60
+    supports_json_schema: true
+    role_affinity:
+      planning: 0.60      # a million-token context suits whole-project work
+      research: 0.50
+      backend: 0.55
+      frontend: 0.55
+      styling: 0.50
+      content: 0.60
+      review: 0.55
+      integration: 0.55
+
+  - id: openrouter/nemotron-ultra
+    provider: openrouter
+    wire_name: nvidia/nemotron-3-ultra-550b-a55b:free
+    context: 1000000
+    max_output: 8192
+    quality_prior: 0.60
+    supports_json_schema: true
+    # Answered in 9.6s against ~1.4s for the others. Fine for planning and
+    # review, poor for anything on the critical path of a wide fan-out.
+    role_affinity:
+      planning: 0.65
+      research: 0.50
+      backend: 0.55
+      frontend: 0.45
+      styling: 0.40
+      content: 0.55
+      review: 0.60
+      integration: 0.50
+
+  - id: openrouter/north-mini-code
+    provider: openrouter
+    wire_name: cohere/north-mini-code:free
+    context: 262144
+    max_output: 8192
+    quality_prior: 0.58
+    supports_json_schema: true
+    # Cohere's code-oriented small model: fast, and narrow by design.
+    role_affinity:
+      planning: 0.40
+      research: 0.30
+      backend: 0.65
+      frontend: 0.60
+      styling: 0.50
+      content: 0.35
+      review: 0.55
+      integration: 0.60
+
+# ===========================================================================
+# Role fallback chains
+#
+# Order is preference order. Validated at load: every chain must span at least
+# two distinct vendors, because failure modes correlate within a vendor — a
+# third attempt at the same vendor tends to fail exactly as the first two did.
+# ===========================================================================
+
+roles:
+  planning:    [gemini/3.6-flash, groq/gpt-oss-120b, openrouter/nemotron-ultra, openrouter/minimax-m3]
+  research:    [gemini/3.6-flash, openrouter/minimax-m3, groq/gpt-oss-120b]
+  backend:     [groq/gpt-oss-120b, gemini/3.6-flash, openrouter/north-mini-code, groq/qwen3-27b]
+  frontend:    [gemini/3.6-flash, groq/qwen3-27b, openrouter/north-mini-code, groq/gpt-oss-120b]
+  styling:     [groq/qwen3-27b, gemini/3.6-flash, openrouter/minimax-m3, groq/gpt-oss-20b]
+  content:     [gemini/3.6-flash, openrouter/minimax-m3, groq/gpt-oss-120b, groq/gpt-oss-20b]
+  review:      [groq/gpt-oss-120b, gemini/3.6-flash, openrouter/nemotron-ultra, groq/qwen3-27b]
+  integration: [gemini/3.6-flash, groq/gpt-oss-120b, openrouter/north-mini-code, groq/qwen3-27b]
+
+# ===========================================================================
+# Defaults
+# ===========================================================================
+
+defaults:
+  # Fraction of a provider's TPM that any single request may occupy. Requests
+  # above this are UNSERVABLE on that model — waiting can never make them fit.
+  max_request_tokens_ratio: 0.9
+
+  # Reviews go to whichever chain rung is cheapest in daily requests, which in
+  # practice means Groq (14,400/day) rather than Gemini (250/day).
+  review_prefers_provider: groq
