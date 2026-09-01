@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>llmorch — Project Blueprint</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --surface: #f7f8fa;
+    --fg: #1a1d21;
+    --muted: #5b6470;
+    --line: #e2e5ea;
+    --accent: #2563eb;
+    --ok: #15803d;
+    --warn: #b45309;
+    --danger: #b91c1c;
+    --code-bg: #f2f4f7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --surface: #171a20;
+      --fg: #e6e8eb;
+      --muted: #9aa3af;
+      --line: #262b33;
+      --accent: #7aa2f7;
+      --ok: #4ade80;
+      --warn: #fbbf24;
+      --danger: #f87171;
+      --code-bg: #1b1f26;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 3rem 1.25rem 6rem;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.65 -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  main { max-width: 54rem; margin: 0 auto; }
+  header {
+    padding-bottom: 1.5rem;
+    margin-bottom: 2.5rem;
+    border-bottom: 2px solid var(--line);
+  }
+  h1 { font-size: 2rem; margin: 0 0 .4rem; letter-spacing: -.02em; }
+  .sub { color: var(--muted); margin: 0; font-size: .95rem; }
+  h2 {
+    font-size: 1.3rem;
+    margin: 3rem 0 1rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--line);
+    letter-spacing: -.01em;
+  }
+  h2:first-of-type { border-top: 0; padding-top: 0; margin-top: 2rem; }
+  h3 { font-size: 1.02rem; margin: 1.75rem 0 .6rem; color: var(--fg); }
+  p, li { color: var(--fg); }
+  code {
+    font: .875em ui-monospace, "Cascadia Code", Consolas, monospace;
+    background: var(--code-bg);
+    padding: .12em .38em;
+    border-radius: 4px;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: .9rem 1.1rem;
+    overflow-x: auto;
+    font: .84rem/1.6 ui-monospace, "Cascadia Code", Consolas, monospace;
+  }
+  pre code { background: none; padding: 0; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0 1.5rem;
+    font-size: .89rem;
+  }
+  th, td {
+    text-align: left;
+    padding: .5rem .6rem;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+  }
+  th { color: var(--muted); font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+  tbody tr:hover { background: var(--surface); }
+  .wrap { overflow-x: auto; }
+  .callout {
+    background: var(--surface);
+    border-left: 3px solid var(--accent);
+    border-radius: 0 8px 8px 0;
+    padding: .9rem 1.1rem;
+    margin: 1.25rem 0;
+  }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout p:first-child { margin-top: 0; }
+  .callout p:last-child { margin-bottom: 0; }
+  .done { color: var(--ok); font-weight: 600; }
+  .todo { color: var(--warn); font-weight: 600; }
+  .crit { color: var(--danger); font-weight: 600; }
+  ul.tight li { margin-bottom: .5rem; }
+  .path {
+    font: .82rem ui-monospace, Consolas, monospace;
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: .55rem .75rem;
+    display: block;
+    margin: .5rem 0;
+    word-break: break-all;
+  }
+  footer {
+    margin-top: 4rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--line);
+    color: var(--muted);
+    font-size: .87rem;
+  }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>llmorch</h1>
+  <p class="sub">Multi-provider LLM orchestrator &middot; Project blueprint and status &middot; Milestone 1 complete</p>
+</header>
+
+<h2>1. What this is</h2>
+
+<p>A <strong>multi-provider LLM orchestrator</strong>. It takes a task ("build a notes app"),
+splits it into a dependency graph, assigns each slice to whichever AI model is best suited
+to it, executes them across vendors, and writes a real runnable project folder to disk.</p>
+
+<p>Original goal: <em>have AI models from different companies collaborate, split work by
+their strengths, and conserve scarce API quota.</em></p>
+
+<h2>2. Three findings that shaped the design</h2>
+
+<h3>(a) Claude and ChatGPT are not in the roster</h3>
+<p>No Anthropic or OpenAI API key is available, and subscriptions (Claude Pro, ChatGPT Plus)
+cannot be called from code. Vendor diversity therefore comes from Google (Gemini) and the
+open-model vendors Groq hosts (Meta, Alibaba, Moonshot). The architecture is
+provider-agnostic — adding a key later is a manifest entry, not a rewrite.</p>
+
+<h3>(b) "Save credits" is a quota-scheduling problem, not a cost problem</h3>
+<p>Nothing in the roster bills per token. The scarce resources are rate limits:</p>
+
+<div class="wrap">
+<table>
+  <thead><tr><th>Provider</th><th>RPM</th><th>TPM</th><th>RPD</th><th>Reset timezone</th></tr></thead>
+  <tbody>
+    <tr><td>Groq</td><td>30</td><td><strong>6,000</strong></td><td>14,400</td><td>UTC</td></tr>
+    <tr><td>Gemini 2.5 Flash</td><td>10</td><td>250,000</td><td><strong>250</strong></td><td>America/Los_Angeles</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Two walls dominate every decision:</p>
+<ul class="tight">
+  <li><strong>Groq's 6,000 TPM</strong> caps a single request at ~5,400 tokens. Larger
+      requests are <em>permanently unservable</em>, not merely delayed.</li>
+  <li><strong>Gemini's 250/day</strong> makes each Gemini request precious.</li>
+</ul>
+
+<h3>(c) Free models are unreliable self-reporters</h3>
+<p>Asked to rate themselves they all claim high competence at everything. So models
+<em>bid</em>, but a deterministic Python pass makes the final assignment.</p>
+
+<h2>3. Architecture</h2>
+
+<pre><code>task text
+  |
+  +-- decompose ----&gt; task DAG + shared interface contract      (1 request)
+  +-- bid ----------&gt; each model rates itself per node          (N &lt;= 4 requests)
+  +-- reconcile ----&gt; feasibility -&gt; normalize -&gt; score -&gt; assign (0 requests)
+  +-- execute ------&gt; DAG scheduler, gated by the quota governor
+  +-- materialize --&gt; artifacts -&gt; runs/&lt;id&gt;/output/            (0 requests)</code></pre>
+
+<h3>The dispatcher — the "middle man"</h3>
+
+<p><code>negotiate/reconcile.py</code> decides which model gets which job. Deterministic
+Python, <strong>not</strong> an LLM: it costs zero requests, runs instantly, is testable
+offline, and cannot hallucinate an assignment that violates a rate limit.</p>
+
+<div class="wrap">
+<table>
+  <thead><tr><th>Source</th><th>Contributes</th><th>Lives in</th></tr></thead>
+  <tbody>
+    <tr><td>Capability sheet</td><td>Hand-written priors per role</td><td><code>role_affinity</code> in models.yaml</td></tr>
+    <tr><td>Self-reported bids</td><td>What a model claims, z-normalized per bidder</td><td><code>bidding.py</code> (M4)</td></tr>
+    <tr><td>Track record</td><td>Realized per-(model, role) performance</td><td><code>profiles.json</code> (M4)</td></tr>
+    <tr><td>Live quota</td><td>How close a model is to its daily wall</td><td><code>governor.headroom()</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<pre><code>score = 0.35*z_conf + 0.25*role_affinity + 0.15*track_record
+      + 0.15*quality_prior - 0.10*quota_pressure</code></pre>
+
+<p>Then a <strong>capacity-constrained assignment measured in tokens</strong> (not node
+count), plus a 2-opt swap pass. Evenness is a hard constraint in an algorithm, never an
+instruction in a prompt.</p>
+
+<h3>The interface contract</h3>
+<p>Decomposition emits a shared spec (routes, data models) that every node receives verbatim.
+This is how a frontend from one vendor works against a backend from another
+<strong>without the models ever talking to each other</strong>.</p>
+
+<h2>4. Current status</h2>
+
+<div class="callout">
+  <p><strong>Milestones 0 and 1 are complete. 210 tests pass</strong>, 1 skipped (symlink
+  test needs admin on Windows).</p>
+  <p>Verified end to end: <code>python -m llmorch run "build a notes app"</code> splits work
+  across 4 models / 2 vendors, writes <code>runs/&lt;id&gt;/output/</code>, and the generated
+  app genuinely serves — POST creates a note, GET lists, detail fetches, <code>/</code>
+  returns the page. All against mocks, zero network calls.</p>
+</div>
+
+<h3>Environment</h3>
+<ul class="tight">
+  <li>Python <strong>3.14.1</strong>, venv at <code>.venv/</code></li>
+  <li>Installed: PyYAML, pydantic 2.13, tzdata 2026.3, pytest, pytest-asyncio</li>
+  <li><code>tzdata</code> is a <strong>hard requirement</strong> on Windows — <code>zoneinfo</code>
+      cannot resolve <code>America/Los_Angeles</code> without it (verified working)</li>
+</ul>
+
+<h3>File status</h3>
+
+<div class="wrap">
+<table>
+  <thead><tr><th>File</th><th>Status</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>types.py</code></td><td class="done">done</td><td>All core dataclasses; imports nothing internal</td></tr>
+    <tr><td><code>errors.py</code></td><td class="done">done</td><td>Split on <code>is_retryable</code> — drives the failover ladder</td></tr>
+    <tr><td><code>config.py</code></td><td class="done">done</td><td>Paths, .env loader, RunConfig. Never logs a key value</td></tr>
+    <tr><td><code>models.yaml</code></td><td class="done">done</td><td>Groq + Gemini active; NIM/Mistral/Perplexity inactive</td></tr>
+    <tr><td><code>registry/manifest.py</code></td><td class="done">done</td><td>Validation incl. the cross-vendor chain rule</td></tr>
+    <tr><td><code>quota/windows.py</code></td><td class="done">done</td><td>SlidingWindow, DayCounter, injectable Clock</td></tr>
+    <tr><td><code>quota/estimator.py</code></td><td class="done">done</td><td>Char-based + per-provider EWMA self-calibration</td></tr>
+    <tr><td><code>quota/governor.py</code></td><td class="done">done</td><td><strong>The core.</strong> Admission control</td></tr>
+    <tr><td><code>quota/store.py</code></td><td class="todo">not built</td><td>SQLite ledger — M2</td></tr>
+    <tr><td><code>providers/base.py</code></td><td class="done">done</td><td>Provider protocol + registry</td></tr>
+    <tr><td><code>providers/mock.py</code></td><td class="done">done</td><td>Canned responses + fault injection</td></tr>
+    <tr><td><code>providers/openai_compat.py</code></td><td class="todo">not built</td><td>M2</td></tr>
+    <tr><td><code>providers/headers.py</code></td><td class="todo">not built</td><td>M2</td></tr>
+    <tr><td><code>engine/graph.py</code></td><td class="done">done</td><td>Kahn levels, cycle repair, budget pruning</td></tr>
+    <tr><td><code>engine/salvage.py</code></td><td class="done">done</td><td>Fence stripping, balanced-JSON recovery</td></tr>
+    <tr><td><code>engine/verify.py</code></td><td class="done">done (Tier 0)</td><td>Tier 1 review designed, wired at M4</td></tr>
+    <tr><td><code>engine/health.py</code></td><td class="done">done</td><td>Failover ladder + circuit breaker</td></tr>
+    <tr><td><code>engine/worker.py</code></td><td class="done">done</td><td>Executes one node, fails over across vendors</td></tr>
+    <tr><td><code>engine/scheduler.py</code></td><td class="done">done</td><td>DAG execution + bulk reassignment</td></tr>
+    <tr><td><code>engine/blackboard.py</code></td><td class="done">done</td><td>Summaries only, never whole artifacts</td></tr>
+    <tr><td><code>engine/materialize.py</code></td><td class="done">done</td><td>Path safety + artifact writeout</td></tr>
+    <tr><td><code>engine/contracts.py</code></td><td class="todo">not built</td><td>Cross-artifact validation — M5</td></tr>
+    <tr><td><code>engine/checkpoint.py</code></td><td class="todo">not built</td><td>Resume across quota days — M2/M3</td></tr>
+    <tr><td><code>negotiate/roles.py</code></td><td class="done">done</td><td>Fixed taxonomy + alias parsing</td></tr>
+    <tr><td><code>negotiate/reconcile.py</code></td><td class="done">done</td><td><strong>The dispatcher</strong></td></tr>
+    <tr><td><code>negotiate/decompose.py</code></td><td class="todo">not built</td><td>M4</td></tr>
+    <tr><td><code>negotiate/bidding.py</code></td><td class="todo">not built</td><td>M4</td></tr>
+    <tr><td><code>negotiate/profiles.py</code></td><td class="todo">not built</td><td>M4</td></tr>
+    <tr><td><code>negotiate/plancache.py</code></td><td class="todo">not built</td><td>M4</td></tr>
+    <tr><td><code>report/render.py</code></td><td class="done">done</td><td>plan/outcome/spend/quota tables</td></tr>
+    <tr><td><code>report/ledger.py</code></td><td class="todo">not built</td><td>M2, with store.py</td></tr>
+    <tr><td><code>demo/website.py</code></td><td class="done">done</td><td>Notes-app DAG + real working canned artifacts</td></tr>
+    <tr><td><code>__main__.py</code></td><td class="done">done</td><td><code>run</code>, <code>plan</code>, <code>quota</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>Tests — 210 passing</h3>
+<div class="wrap">
+<table>
+  <thead><tr><th>File</th><th>Covers</th></tr></thead>
+  <tbody>
+    <tr><td><code>test_foundations.py</code></td><td>types, errors, config</td></tr>
+    <tr><td><code>test_manifest.py</code></td><td>manifest loading + validation rules</td></tr>
+    <tr><td><code>test_governor.py</code></td><td>admission control, day rollovers, reserves</td></tr>
+    <tr><td><code>test_materialize.py</code></td><td>salvage + path safety (security-critical)</td></tr>
+    <tr><td><code>test_reconcile.py</code></td><td>graph + dispatcher + bid normalization</td></tr>
+    <tr><td><code>test_health_verify.py</code></td><td>failover, circuit breaker, Tier 0 checks</td></tr>
+    <tr><td><code>test_integration.py</code></td><td>full pipeline, fault injection, degradation</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2>5. Bugs found during the build (all fixed)</h2>
+
+<p>Each would have cost live quota to discover — the reason for building offline first.</p>
+
+<ol>
+  <li><p><strong>models.yaml was internally invalid.</strong> Groq models declared
+  <code>max_output: 8192</code>, but Groq's 6,000 TPM caps a request at ~5,400 tokens, so
+  those models could never serve a full-size request. Now capped at 4,096 — which leaves
+  only ~1,300 tokens for the prompt. <strong>Groq nodes must stay small.</strong></p></li>
+
+  <li><p><strong>Fair-share cap could be smaller than a single node</strong>, making it
+  unsatisfiable — every node fell through to "best available" and balancing silently never
+  ran. Fixed with a floor of <code>max(largest_node, even_share)</code>.</p></li>
+
+  <li><p><strong>check_css passed unparseable Python as valid CSS.</strong> Bracket-balance
+  alone accepts it (zero braces is balanced). Worse, the wrongly-successful node
+  <em>reset the circuit breaker's failure streak</em>. Now requires at least one rule
+  block.</p></li>
+</ol>
+
+<h2>6. Load-bearing invariants</h2>
+
+<div class="callout warn">
+  <p>These will silently break the system if violated.</p>
+</div>
+
+<ul class="tight">
+  <li><strong>UNSERVABLE is not WAIT.</strong> A request larger than a provider's
+      per-minute ceiling never fits. Treating it as a wait hangs the scheduler forever.</li>
+  <li><strong>max_tokens is always set explicitly.</strong> It turns the completion estimate
+      into a hard bound, which is what makes admission control sound.</li>
+  <li><strong>Reserve on estimate, reconcile on commit.</strong> Without it, concurrent
+      fan-out races — several callers each read a counter none has yet incremented.</li>
+  <li><strong>Monotonic clock for sliding windows; wall clock for day boundaries. Never
+      mixed.</strong> Wall time for RPM would let a clock adjustment grant free quota;
+      monotonic for RPD would never reset.</li>
+  <li><strong>Response headers override local counters.</strong> Local counting is
+      inference; headers are fact and cost nothing to read.</li>
+  <li><strong>Running out of quota is NOT a health failure.</strong> A model at its daily
+      cap is unavailable, not broken — it must not accumulate a track-record penalty.</li>
+  <li><strong>Failover prefers a different vendor.</strong> Failure modes correlate within
+      a vendor; a third attempt at the same one tends to fail identically.</li>
+  <li><strong>Fallback chains must span at least 2 vendors</strong> — enforced at manifest load.</li>
+  <li><strong>A reviewer must never share the author's vendor</strong> — self-review
+      re-approves its own mistakes.</li>
+  <li><strong>output_path is untrusted input.</strong> It is the only place model output
+      reaches the filesystem. Resolve-then-verify-containment, never string inspection.</li>
+  <li><strong>Downstream nodes get summaries, never whole artifacts.</strong> Pasting
+      upstream files into downstream prompts is the fastest way to exhaust 6,000 TPM.</li>
+  <li><strong>A degraded node must never fail the whole run.</strong></li>
+</ul>
+
+<h2>7. Roadmap</h2>
+
+<div class="wrap">
+<table>
+  <thead><tr><th></th><th>Milestone</th><th>Status</th><th>Needs</th></tr></thead>
+  <tbody>
+    <tr><td>M0</td><td>Setup, secret hygiene</td><td class="done">DONE</td><td>—</td></tr>
+    <tr><td>M1</td><td>Offline skeleton, zero API calls</td><td class="done">DONE</td><td>—</td></tr>
+    <tr><td>M2</td><td>First real requests, <strong>Groq only</strong></td><td class="todo">next</td><td>GROQ_API_KEY</td></tr>
+    <tr><td>M3</td><td>Add Gemini; cross-vendor failover live</td><td></td><td>GEMINI_API_KEY</td></tr>
+    <tr><td>M3.5</td><td>NVIDIA NIM + Mistral (adaptive limit discovery)</td><td></td><td>those keys</td></tr>
+    <tr><td>M4</td><td>Negotiation live + Tier 1 cross-vendor review</td><td></td><td>—</td></tr>
+    <tr><td>M5</td><td>Optimization; Perplexity behind --allow-paid</td><td></td><td>—</td></tr>
+    <tr><td>M6</td><td>Web dashboard (read-only, localhost-only)</td><td></td><td>—</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>M2 — the immediate next step</h3>
+<p>Build <code>providers/openai_compat.py</code>, <code>providers/headers.py</code>,
+<code>quota/store.py</code>, <code>report/ledger.py</code>, and an
+<code>llmorch doctor</code> command.</p>
+<p>Groq first <strong>deliberately</strong>: 14,400 requests/day makes it the safe place to
+debug header parsing and counter sync.</p>
+
+<div class="callout warn">
+  <p><strong>Unverified:</strong> the Groq wire names in models.yaml
+  (<code>llama-3.3-70b-versatile</code>, <code>qwen3-32b</code>,
+  <code>openai/gpt-oss-120b</code>) have not been checked against the live API.
+  <code>llmorch doctor</code> should confirm each with one trivial call before anything
+  depends on them.</p>
+</div>
+
+<h3>Decisions already made — do not re-litigate</h3>
+<ul class="tight">
+  <li>Demo is a <strong>notes app, no auth</strong> (list page, detail page, SQLite CRUD).</li>
+  <li>Stack is <strong>pinned</strong> (plain HTML/CSS/JS + stdlib http.server + SQLite) so
+      the contract checker knows what it is parsing. Swapping to a richer stack later
+      touches only the decompose prompt and contracts.py.</li>
+  <li>Dashboard is <strong>deferred to M6</strong>; M1–M5 output is terminal text + report.md.</li>
+  <li>Perplexity is <strong>paid</strong> (~$1/Mtok plus $5–14 per 1,000 requests) and needs
+      both <code>--allow-paid</code> and a non-zero budget.</li>
+  <li>Coordination is <strong>negotiate once, then route</strong> — not free-form model chatter.</li>
+</ul>
+
+<h2>8. How to run</h2>
+
+<pre><code>cd C:\Users\prana\temp_file
+
+.venv\Scripts\python.exe -m pytest -q
+
+.venv\Scripts\python.exe -m llmorch plan --explain "build a notes app"
+
+.venv\Scripts\python.exe -m llmorch run "build a notes app"
+
+.venv\Scripts\python.exe -m llmorch quota</code></pre>
+
+<p>Then run the generated app — it serves on <code>http://localhost:8000</code>:</p>
+
+<pre><code>.venv\Scripts\python.exe runs\&lt;id&gt;\output\server.py</code></pre>
+
+<h2>9. Secrets</h2>
+
+<p><code>.env</code> exists with <strong>all keys blank</strong>, gitignored.
+<code>.env.example</code> documents each provider, its free-tier limits, and its signup URL.
+<code>.gitignore</code> was written <em>before</em> <code>.env</code> existed, so no key ever
+sat in a trackable file.</p>
+
+<p>Milestone 1 needs <strong>no keys at all</strong>.</p>
+
+<footer>
+  <p><strong>Project files</strong></p>
+  <span class="path">C:\Users\prana\temp_file\ &mdash; the codebase</span>
+  <span class="path">C:\Users\prana\temp_file\PROJECT.md &mdash; this document, in markdown</span>
+  <span class="path">C:\Users\prana\.claude\plans\this-is-totally-a-glimmering-snail.md &mdash; original plan, full rationale, 18-entry decisions log</span>
+</footer>
+
+</main>
+</body>
+</html>
