@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,9 +25,9 @@ from llmorch.engine.blackboard import Blackboard
 from llmorch.engine.graph import TaskGraph
 from llmorch.engine.scheduler import Scheduler
 from llmorch.providers.base import ProviderRegistry
-from llmorch.providers.openai_compat import HttpResponse, build_provider
+from llmorch.providers.openai_compat import HttpResponse, OpenAICompatProvider
 from llmorch.quota.governor import Governor
-from llmorch.quota.store import open_store
+from llmorch.quota.store import LedgerStore, restore_governor
 from llmorch.quota.windows import FakeClock
 from llmorch.registry.manifest import load_manifest
 from llmorch.types import NodeState
@@ -65,6 +66,16 @@ class RecordingTransport:
         """node_id -> how many times to fail before succeeding. Absent means
         always, which is how a node is driven all the way to degraded."""
         self._failed: dict[str, int] = {}
+
+    async def post(self, url, *, headers, body, timeout_s=60.0) -> HttpResponse:
+        """Bridge to this line's Transport protocol.
+
+        This file arrived from the 24 August branch, where a transport was a
+        callable taking a request object. The behaviour below is unchanged —
+        only the calling convention is adapted, so the tests keep testing what
+        they were written to test.
+        """
+        return self(SimpleNamespace(body=body, url=url, headers=headers))
 
     def __call__(self, request) -> HttpResponse:
         payload = json.loads(request.body)
@@ -105,9 +116,14 @@ class RecordingTransport:
 def _harness(manifest, store, transport, *, run_id="live-test"):
     """A scheduler wired the way `llmorch run --live` wires one."""
     registry = ProviderRegistry()
-    for name in ("groq", "gemini"):
-        provider = build_provider(
-            manifest.providers[name], manifest.models, "test-key", transport=transport
+    for name in sorted({m.provider for m in manifest.enabled_models}):
+        spec = manifest.providers[name]
+        provider = OpenAICompatProvider(
+            name=name,
+            base_url=spec.base_url,
+            api_key="test-key",
+            wire_names={m.id: m.wire_name for m in manifest.models if m.provider == name},
+            transport=transport,
         )
         for model in manifest.models:
             if model.provider == name:
@@ -119,10 +135,15 @@ def _harness(manifest, store, transport, *, run_id="live-test"):
         manifest,
         Governor(manifest, clock=FakeClock()),
         registry,
-        config=RunConfig(task="build a notes app", run_id=run_id, dry_run=False),
+        config=RunConfig(
+            task="build a notes app", run_id=run_id, dry_run=False,
+            # Tier 1 arrived after this file did, and doubles the request
+            # count. These tests are about the wire path.
+            review="off",
+        ),
         blackboard=Blackboard(interface=INTERFACE),
         sleep=_no_sleep,
-        store=store,
+        ledger=store,
     )
     return scheduler, graph
 
@@ -134,7 +155,7 @@ def _harness(manifest, store, transport, *, run_id="live-test"):
 
 def test_live_run_completes_through_the_real_adapter(manifest, tmp_path):
     transport = RecordingTransport()
-    with open_store(tmp_path / "l.db") as store:
+    with LedgerStore(tmp_path / "l.db") as store:
         scheduler, graph = _harness(manifest, store, transport)
         outcome = asyncio.run(scheduler.run(scheduler.plan()))
 
@@ -145,13 +166,15 @@ def test_live_run_completes_through_the_real_adapter(manifest, tmp_path):
 def test_every_request_carries_the_vendors_wire_name(manifest, tmp_path):
     # The id/wire-name split only exists on the live path; a mock never sees it.
     transport = RecordingTransport()
-    with open_store(tmp_path / "l.db") as store:
+    with LedgerStore(tmp_path / "l.db") as store:
         scheduler, _ = _harness(manifest, store, transport)
         asyncio.run(scheduler.run(scheduler.plan()))
 
     sent = {r["model"] for r in transport.requests}
     assert sent, "no requests were made"
-    assert sent <= {*GROQ_MODELS, "gemini-3.6-flash"}
+    # Derived, not hardcoded: this assertion went stale once already, when the
+    # roster moved from qwen3.6 to qwen3.8.
+    assert sent <= {m.wire_name for m in manifest.enabled_models}
     assert not any(m.startswith("groq/") for m in sent), "ids leaked onto the wire"
 
 
@@ -159,7 +182,7 @@ def test_every_request_sets_max_tokens(manifest, tmp_path):
     # The invariant admission control rests on: without an explicit cap the
     # completion estimate is a guess rather than a bound.
     transport = RecordingTransport()
-    with open_store(tmp_path / "l.db") as store:
+    with LedgerStore(tmp_path / "l.db") as store:
         scheduler, _ = _harness(manifest, store, transport)
         asyncio.run(scheduler.run(scheduler.plan()))
 
@@ -171,7 +194,7 @@ def test_no_request_exceeds_groqs_per_minute_ceiling(manifest, tmp_path):
     # that is permanently unservable, so the governor must never have let it
     # through; max_output holds each model well under the line.
     transport = RecordingTransport()
-    with open_store(tmp_path / "l.db") as store:
+    with LedgerStore(tmp_path / "l.db") as store:
         scheduler, _ = _harness(manifest, store, transport)
         asyncio.run(scheduler.run(scheduler.plan()))
 
@@ -186,15 +209,15 @@ def test_no_request_exceeds_groqs_per_minute_ceiling(manifest, tmp_path):
 
 
 def test_a_live_run_is_recorded(manifest, tmp_path):
-    with open_store(tmp_path / "l.db") as store:
+    with LedgerStore(tmp_path / "l.db") as store:
         scheduler, graph = _harness(manifest, store, RecordingTransport())
         asyncio.run(scheduler.run(scheduler.plan()))
 
-        events = store.events_for_run("live-test")
+        events = store.recent(100, run_id="live-test")
         assert len(events) == len(graph.nodes)
         assert all(e.ok for e in events)
         assert all(e.purpose == "execute" for e in events)
-        assert all(e.usage.prompt_tokens == 120 for e in events)
+        assert all(e.prompt_tokens == 120 for e in events)
 
 
 def test_a_dry_run_is_not_recorded(manifest, tmp_path):
@@ -207,7 +230,7 @@ def test_a_dry_run_is_not_recorded(manifest, tmp_path):
     for model in manifest.enabled_models:
         registry.register(model.id, provider)
 
-    with open_store(tmp_path / "l.db") as store:
+    with LedgerStore(tmp_path / "l.db") as store:
         scheduler = Scheduler(
             TaskGraph.build(build_nodes()),
             manifest,
@@ -216,11 +239,11 @@ def test_a_dry_run_is_not_recorded(manifest, tmp_path):
             config=RunConfig(task="t", run_id="dry-test"),
             blackboard=Blackboard(interface=INTERFACE),
             sleep=_no_sleep,
-            store=None,  # what `_setup` passes on a dry run
+            ledger=None,  # what `_setup` passes on a dry run
         )
         asyncio.run(scheduler.run(scheduler.plan()))
 
-        assert store.events_for_run("dry-test") == ()
+        assert store.recent(100, run_id="dry-test") == []
 
 
 def test_a_transient_429_is_recorded_and_the_node_still_lands(manifest, tmp_path):
@@ -231,11 +254,11 @@ def test_a_transient_429_is_recorded_and_the_node_still_lands(manifest, tmp_path
     )
     transport = RecordingTransport(fail={"schema": failure}, fail_times={"schema": 1})
 
-    with open_store(tmp_path / "l.db") as store:
+    with LedgerStore(tmp_path / "l.db") as store:
         scheduler, _ = _harness(manifest, store, transport)
         outcome = asyncio.run(scheduler.run(scheduler.plan()))
 
-        failed = [e for e in store.events_for_run("live-test") if not e.ok]
+        failed = [e for e in store.recent(100, run_id="live-test") if not e.ok]
 
         assert failed, "the 429 was not recorded"
         assert failed[0].http_status == 429
@@ -257,7 +280,7 @@ def test_a_transient_429_does_not_bench_the_model_for_the_run(manifest, tmp_path
     )
     transport = RecordingTransport(fail={"schema": failure}, fail_times={"schema": 2})
 
-    with open_store(tmp_path / "l.db") as store:
+    with LedgerStore(tmp_path / "l.db") as store:
         scheduler, graph = _harness(manifest, store, transport)
         outcome = asyncio.run(scheduler.run(scheduler.plan()))
 
@@ -277,7 +300,7 @@ def test_a_daily_429_does_bench_the_model(manifest, tmp_path):
     )
     transport = RecordingTransport(fail={"schema": failure}, fail_times={"schema": 1})
 
-    with open_store(tmp_path / "l.db") as store:
+    with LedgerStore(tmp_path / "l.db") as store:
         scheduler, _ = _harness(manifest, store, transport)
         asyncio.run(scheduler.run(scheduler.plan()))
 
@@ -298,18 +321,26 @@ def test_spend_from_a_live_run_survives_into_the_next_process(manifest, tmp_path
     """
     path = tmp_path / "shared.db"
 
-    with open_store(path) as store:
+    with LedgerStore(path) as store:
         scheduler, graph = _harness(manifest, store, RecordingTransport())
         asyncio.run(scheduler.run(scheduler.plan()))
 
-    with open_store(path) as store:
-        governor = Governor(manifest, clock=FakeClock())
+    with LedgerStore(path) as store:
+        # A real clock on purpose. Ledger rows are stamped with the provider's
+        # day key from the wall clock, so a governor driven by a fake clock
+        # starting in January would look for a day that has no rows in it and
+        # restore nothing — silently passing a test about restoration.
+        governor = Governor(manifest)
         assert sum(h.requests_used for h in governor.headroom().values()) == 0
 
-        governor.restore_daily(store.usage_by_model_today(governor.reset_timezones()))
-        assert sum(h.requests_used for h in governor.headroom().values()) == len(
-            graph.nodes
-        )
+        restore_governor(governor, store, manifest)
+
+        # Not a sum across models: an account-scoped bucket reports the same
+        # total against every model on that provider, so summing triple-counts
+        # a three-model vendor. What matters is that a process which made no
+        # calls of its own knows what the previous one spent.
+        assert store.run_usage("live-test").requests == len(graph.nodes)
+        assert any(h.requests_used > 0 for h in governor.headroom().values())
 
 
 def test_rate_limit_headers_are_believed_over_local_counting(manifest, tmp_path):
@@ -324,7 +355,7 @@ def test_rate_limit_headers_are_believed_over_local_counting(manifest, tmp_path)
             "x-ratelimit-remaining-requests": "940",
         }
     )
-    with open_store(tmp_path / "l.db") as store:
+    with LedgerStore(tmp_path / "l.db") as store:
         scheduler, _ = _harness(manifest, store, transport)
         asyncio.run(scheduler.run(scheduler.plan()))
 
