@@ -124,11 +124,6 @@ def build_server(
     # would spend its whole life inside that one connection, and a second
     # client — another tab, or a curl to check something — would hang until the
     # browser was closed. Found exactly that way.
-    # Threading, not the plain HTTPServer. The page holds a keep-alive
-    # connection open and polls it every five seconds; a single-threaded server
-    # would spend its whole life inside that one connection, and a second
-    # client — another tab, or a curl to check something — would hang until the
-    # browser was closed. Found exactly that way.
     server = ThreadingHTTPServer((host, port), _Handler)
     server.daemon_threads = True
     return server

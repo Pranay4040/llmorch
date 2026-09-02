@@ -120,8 +120,9 @@ Supporting commands: `doctor --probe` (verify wire names before depending on
 them), `discover` (ask a key which models it can reach, spending no tokens),
 `quota`, `ledger`, `dashboard` (read-only, loopback only).
 
-Full design notes, and every fault the live runs exposed, are in
-[LLMORCH.md](LLMORCH.md).
+Current state, what is next, and the invariants not to break are in
+[HANDOFF.md](HANDOFF.md). The original 45k plan is in
+[docs/original-plan.md](docs/original-plan.md).
 
 ## Install
 
