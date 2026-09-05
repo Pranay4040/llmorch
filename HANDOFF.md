@@ -23,6 +23,8 @@ Two things in one repo:
 .venv/Scripts/python.exe -m llmorch run --smoke "<task>"          # ...then run the result
 .venv/Scripts/python.exe -m llmorch run --smoke-install "<task>"  # ...installing its deps first
 .venv/Scripts/python.exe -m llmorch run --live --providers all "<task>"
+.venv/Scripts/llmorch.exe                              # a session — the short way in
+.venv/Scripts/llmorch.exe "build a notes app"          # ...with the first thing said
 .venv/Scripts/python.exe -m llmorch chat               # a session, not one shot
 .venv/Scripts/python.exe -m llmorch chat --continue    # ...pick the last one back up
 .venv/Scripts/python.exe -m llmorch resume <run_id>    # after a quota wall

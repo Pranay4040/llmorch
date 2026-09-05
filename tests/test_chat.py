@@ -393,3 +393,73 @@ def _one_node_change() -> str:
             ]
         }
     )
+
+
+# ==========================================================================
+# The shortest way in
+# ==========================================================================
+
+
+def test_a_bare_invocation_opens_a_session(tmp_path, monkeypatch, capsys):
+    """`llmorch` on its own used to be an argparse error."""
+    from llmorch import __main__ as cli
+
+    _offline(monkeypatch, tmp_path, revise_response='{"nodes": []}')
+    _script(monkeypatch, "/quit")
+
+    assert cli.main([]) == 0
+    assert "New session" in capsys.readouterr().out
+
+
+def test_an_opening_instruction_is_said_for_you(tmp_path, monkeypatch, capsys):
+    """`llmorch "build a notes app"` is one line instead of two."""
+    from llmorch import __main__ as cli
+
+    _offline(monkeypatch, tmp_path, revise_response='{"nodes": []}')
+    _script(monkeypatch, "/quit")
+
+    assert cli.main(["build a notes app"]) == 0
+
+    out = capsys.readouterr().out
+    session_id = out.split("New session ", 1)[1].split(".", 1)[0]
+    conversation = Conversation.load(session_id)
+    assert [t.instruction for t in conversation.turns] == ["build a notes app"]
+
+
+def test_cli_is_the_same_door_as_chat(tmp_path, monkeypatch, capsys):
+    from llmorch import __main__ as cli
+
+    _offline(monkeypatch, tmp_path, revise_response='{"nodes": []}')
+    _script(monkeypatch, "/quit")
+
+    assert cli.main(["cli"]) == 0
+    assert "New session" in capsys.readouterr().out
+
+
+def test_flags_alone_still_open_a_session(tmp_path, monkeypatch, capsys):
+    from llmorch import __main__ as cli
+
+    _offline(monkeypatch, tmp_path, revise_response='{"nodes": []}')
+    _script(monkeypatch, "/quit")
+
+    assert cli.main(["--smoke"]) == 0
+    assert "New session" in capsys.readouterr().out
+
+
+def test_every_subcommand_still_routes_to_itself():
+    """The shortcut must not swallow a real command: `llmorch run` is a run."""
+    from llmorch import __main__ as cli
+
+    parser = cli.build_parser()
+    assert "run" in parser.subcommand_names
+    assert "chat" in parser.subcommand_names and "cli" in parser.subcommand_names
+
+    for name, expected in (
+        ("run", cli.cmd_run),
+        ("plan", cli.cmd_plan),
+        ("quota", cli.cmd_quota),
+        ("doctor", cli.cmd_doctor),
+        ("chat", cli.cmd_chat),
+        ("cli", cli.cmd_chat),
+    ):
+        assert parser.parse_args([name]).func is expected
