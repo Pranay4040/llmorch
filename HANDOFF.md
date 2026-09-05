@@ -18,7 +18,7 @@ Two things in one repo:
 ## Run it
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q                  # 449 tests, no network
+.venv/Scripts/python.exe -m pytest -q                  # 478 tests, no network
 .venv/Scripts/python.exe -m llmorch run "build a notes app"        # mock, offline
 .venv/Scripts/python.exe -m llmorch run --smoke "<task>"          # ...then run the result
 .venv/Scripts/python.exe -m llmorch run --live --providers all "<task>"
@@ -30,6 +30,11 @@ Two things in one repo:
 
 Keys live in `.env` (gitignored). Nothing above needs one except `--live`,
 `--probe` and `discover`.
+
+`.github/workflows/tests.yml` runs the suite on push and pull request across
+Linux (3.11, 3.13) and Windows (3.12), then does a full offline demo run with
+`--smoke`. Everything it does is offline, so CI needs no secrets and never
+spends quota.
 
 ## Roster (verified live 2026-09-01)
 

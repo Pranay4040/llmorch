@@ -1,5 +1,7 @@
 # llmorch
 
+[![tests](https://github.com/Pranay4040/llmorch/actions/workflows/tests.yml/badge.svg)](https://github.com/Pranay4040/llmorch/actions/workflows/tests.yml)
+
 **Quota governance for applications that call several LLM providers** — plus an
 orchestrator built on top of it, as the worked example.
 
@@ -139,3 +141,8 @@ Current state, what is next, and the invariants not to break are in
 pip install -e ".[dev]"
 python -m pytest -q
 ```
+
+CI runs that suite on Linux (3.11 and 3.13) and Windows (3.12), then does a full
+offline demo run with `--smoke` — plan, execute against the mock provider, write
+the folder, and start what it wrote. Windows is in the matrix on purpose: three
+of the invariants this project holds were faults that only appear there.
