@@ -153,6 +153,12 @@ build makes likely and a single author never would: every file impeccable agains
 its own spec, and the project broken because two models agreed with the spec and
 not with each other.
 
+Each run leaves `runs/<run_id>/report.md` next to the folder it produced —
+verdict first, then which model wrote which file, what the quota bought, how
+evenly the work landed, and what the checks and the smoke run found. The
+artifacts stay on disk indefinitely and look equally plausible either way; the
+evidence about them should not be the one part that lives in scrollback.
+
 Supporting commands: `doctor --probe` (verify wire names before depending on
 them), `discover` (ask a key which models it can reach, spending no tokens),
 `quota`, `ledger`, `dashboard` (read-only, loopback only).

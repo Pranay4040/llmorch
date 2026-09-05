@@ -1,6 +1,6 @@
 # llmorch — handoff
 
-**State:** M0–M6 done, plus the smoke run. 527 tests pass, 1 skipped on Windows
+**State:** M0–M6 done, plus the smoke run. 542 tests pass, 1 skipped on Windows
 (a symlink test needing admin). Published at github.com/Pranay4040/llmorch,
 tagged `v0.1.0`.
 
@@ -18,7 +18,7 @@ Two things in one repo:
 ## Run it
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q                  # 527 tests, no network
+.venv/Scripts/python.exe -m pytest -q                  # 542 tests, no network
 .venv/Scripts/python.exe -m llmorch run "build a notes app"        # mock, offline
 .venv/Scripts/python.exe -m llmorch run --smoke "<task>"          # ...then run the result
 .venv/Scripts/python.exe -m llmorch run --smoke-install "<task>"  # ...installing its deps first
@@ -31,6 +31,11 @@ Two things in one repo:
 
 Keys live in `.env` (gitignored). Nothing above needs one except `--live`,
 `--probe` and `discover`.
+
+Every run writes `runs/<run_id>/report.md` beside its output folder: the verdict
+first, then nodes, spend, fair share, cross-artifact checks and the smoke run.
+It is the same information the terminal prints, kept for someone reading it
+after the scrollback is gone.
 
 `.github/workflows/tests.yml` runs the suite on push and pull request across
 Linux (3.11, 3.13) and Windows (3.12), then does a full offline demo run with
@@ -116,6 +121,15 @@ Each was learned by getting it wrong against a live API.
   anything is started, so the report says so — and a process that dies naming a
   module nobody installed gets the same attribution rather than reading as the
   model writing a bad import.
+- **`report.md` recomputes nothing and holds no key.** Every figure comes from
+  the same objects the terminal renderers read, so the file and the screen
+  cannot disagree about what happened; and it is as publishable as the output
+  folder beside it, which is why the rule that keeps secrets out of the ledger
+  and out of error strings covers it too.
+- **The verdict reports the result, not the steps.** A run whose nodes all
+  succeeded can still have produced a project that does not run — that is the
+  case the section exists for, and why a smoke run that never happened is
+  written as "not started" rather than left blank.
 - **A refused launch is never a fallback.** A contract that states how to start
   itself and states something the allowlist will not run gets a skip naming the
   reason. Quietly guessing `server.py` instead would start a different program

@@ -53,6 +53,7 @@ from .quota.governor import Governor
 from .quota.store import DayUsage, LedgerStore, restore_governor
 from .registry.manifest import Manifest, load_manifest
 from .types import InterfaceContract
+from .report.document import REPORT_NAME, render_run_report
 from .report.ledger import render_day_usage, render_recent, render_restored
 from .report.render import (
     render_contracts,
@@ -503,6 +504,24 @@ def _execute(session: Session, args, *, resume: Checkpoint | None = None) -> int
             install=wants_install,
         )
         print(render_smoke(smoke))
+
+    # The same findings, written down. Everything above this line lives in
+    # scrollback; the artifacts it describes live on disk indefinitely.
+    report_path = config.run_dir / REPORT_NAME
+    report_path.write_text(
+        render_run_report(
+            config=config,
+            graph=session.graph,
+            plan=plan,
+            outcome=outcome,
+            materialized=report,
+            contract=contract,
+            smoke=smoke,
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    print(f"  {report_path}")
 
     print(render_warnings(outcome.warnings))
 
