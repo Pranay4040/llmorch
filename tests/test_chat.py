@@ -463,3 +463,29 @@ def test_every_subcommand_still_routes_to_itself():
         ("cli", cli.cmd_chat),
     ):
         assert parser.parse_args([name]).func is expected
+
+
+def test_the_repository_shim_runs_the_cli():
+    """`./llmorch` and `llmorch.cmd` at the repo root, for the PATH problem.
+
+    `pip install -e .` puts an executable in the venv's bin directory, which
+    only answers to a bare `llmorch` if that directory is on PATH — so the first
+    thing a new checkout says is "'llmorch' is not recognized".
+
+    This is also the only way the Windows shim gets tested: it cannot run on the
+    machine it was written on, and the windows-latest job is where it is proved.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    shim = root / ("llmorch.cmd" if sys.platform == "win32" else "llmorch")
+    assert shim.is_file(), f"{shim.name} is missing from the repository root"
+
+    finished = subprocess.run(
+        [str(shim), "--help"], capture_output=True, text=True, timeout=180
+    )
+
+    assert finished.returncode == 0, finished.stderr
+    assert "usage: llmorch" in finished.stdout
