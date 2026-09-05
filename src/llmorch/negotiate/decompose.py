@@ -185,6 +185,14 @@ the change.
 In `interface`, emit only what the change adds or alters. What you leave out is \
 kept as it is, so there is no need to restate the parts that do not move.
 
+Whatever you add there, you must also staff. A route you declare needs a node \
+that serves it; a page you declare needs a node that writes it. That the file \
+which would serve it already exists is not enough — if it does not serve the \
+route today, the node that rewrites it is one of the nodes you emit. A contract \
+promising what no node delivers is not a smaller change, it is a broken one: it \
+fails the cross-artifact check, and the route returns 404 when the project is \
+run.
+
 Reply with ONLY a JSON object. No prose, no code fence.
 """
     user = (
