@@ -113,8 +113,17 @@ runnable project folder:
 ```bash
 llmorch run "build a notes app"                  # mock provider, no network
 llmorch run --live --providers all "build a CLI that converts CSV to markdown"
+llmorch run --smoke "build a notes app"          # ...and then run what it wrote
 llmorch resume <run_id>                          # after a quota wall
 ```
+
+`--smoke` starts the generated project, drives the contract's pages and routes
+against it over HTTP, and reports what came back. It is off by default and has
+to be asked for: every other step in the system treats model output as untrusted
+data, and this one hands it the interpreter. What it buys is the only evidence in
+a run that did not come from reading the code — a project whose files all parse,
+all pass review, and all agree with each other can still serve every page from
+the wrong directory, and nothing static will say so.
 
 Supporting commands: `doctor --probe` (verify wire names before depending on
 them), `discover` (ask a key which models it can reach, spending no tokens),

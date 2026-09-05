@@ -14,6 +14,7 @@ if TYPE_CHECKING:  # pragma: no cover - doctor imports providers; keep it lazy
     from ..engine.checkpoint import Checkpoint
     from ..discover import Discovery
     from ..engine.contracts import ContractReport
+    from ..engine.smoke import SmokeReport
 
 
 def _bar(used: int, limit: int | None, width: int = 20) -> str:
@@ -264,6 +265,69 @@ def render_contracts(report: "ContractReport") -> str:
     lines.append(
         f"  {len(report.errors)} mismatch(es), {len(report.warnings)} warning(s) "
         "across artifacts written by different models"
+    )
+    return "\n".join(lines)
+
+
+def render_smoke(report: "SmokeReport") -> str:
+    """What happened when the generated project was actually run.
+
+    A skip is printed as a skip, never as a pass. The whole value of this step is
+    that it is the only evidence in the run that came from executing the code,
+    so "we did not get to find out" must not read like "it works".
+    """
+    lines = ["", "Smoke run", "=" * 78]
+
+    if not report.ran:
+        # A skip and a crash both leave `ran` False and mean opposite things:
+        # one is no evidence, the other is the worst evidence there is.
+        if report.skipped:
+            lines.append(f"  skipped — {report.skipped}")
+        else:
+            lines.append(
+                f"  {report.entrypoint or 'the project'} never reached a serving state"
+            )
+        for issue in report.errors + report.warnings:
+            mark = "FAIL" if issue.severity == "error" else "warn"
+            lines.append(f"  [{mark}] {issue.what}")
+            if issue.why:
+                lines.append(f"         {issue.why}")
+        if report.stderr_tail:
+            lines.append("  " + "-" * 74)
+            lines.append("  stderr:")
+            lines += [f"    {line}" for line in report.stderr_tail.splitlines()[-12:]]
+        return "\n".join(lines)
+
+    lines.append(f"  {report.entrypoint} on http://127.0.0.1:{report.port}")
+    for probe in report.probes:
+        status = str(probe.status) if probe.status is not None else "---"
+        note = f"  {probe.detail}" if probe.status is None and probe.detail else ""
+        lines.append(f"    {status:>4}  {probe.label}{note}")
+
+    if not report.issues:
+        lines.append("  " + "-" * 74)
+        lines.append(
+            f"  {len(report.probes)} request(s), no server-side failures — "
+            "the assembled project runs"
+        )
+        return "\n".join(lines)
+
+    lines.append("  " + "-" * 74)
+    for issue in report.errors + report.warnings:
+        mark = "FAIL" if issue.severity == "error" else "warn"
+        lines.append(f"  [{mark}] {issue.what}")
+        if issue.why:
+            lines.append(f"         {issue.why}")
+
+    if report.stderr_tail:
+        lines.append("  " + "-" * 74)
+        lines.append("  stderr:")
+        lines += [f"    {line}" for line in report.stderr_tail.splitlines()[-12:]]
+
+    lines.append("  " + "-" * 74)
+    lines.append(
+        f"  {len(report.errors)} failure(s), {len(report.warnings)} warning(s) "
+        f"across {len(report.probes)} request(s)"
     )
     return "\n".join(lines)
 

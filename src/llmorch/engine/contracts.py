@@ -109,6 +109,27 @@ def _declared_routes(interface: InterfaceContract) -> list[dict[str, Any]]:
     return [r for r in interface.routes if isinstance(r, dict) and r.get("path")]
 
 
+def local_asset_refs(text: str) -> list[tuple[str, str]]:
+    """Every href/src in `text` naming a file this project is meant to produce.
+
+    Returns `(as written, normalised)` pairs — the first for error messages that
+    have to quote what the page actually says, the second for lookups. External
+    URLs, anchors and `data:` URIs are dropped.
+
+    Public because the smoke run needs the same list for a different question:
+    this module asks whether the file was written, and that one asks whether the
+    running server hands it back.
+    """
+    refs: list[tuple[str, str]] = []
+    for ref in _ASSET_REF.findall(text):
+        if not _is_local_asset(ref):
+            continue
+        target = _normalise_asset(ref)
+        if target:
+            refs.append((ref, target))
+    return refs
+
+
 # --------------------------------------------------------------------------
 # Checks
 # --------------------------------------------------------------------------
@@ -139,11 +160,8 @@ def check_assets_resolve(artifacts: dict[str, str], report: ContractReport) -> N
     for path, text in artifacts.items():
         if not path.lower().endswith(_MARKUP):
             continue
-        for ref in _ASSET_REF.findall(text):
-            if not _is_local_asset(ref):
-                continue
-            target = _normalise_asset(ref)
-            if target and target not in artifacts:
+        for ref, target in local_asset_refs(text):
+            if target not in artifacts:
                 report.add(
                     "error",
                     f"`{path}` references `{ref}`, which no node produced",
