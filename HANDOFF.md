@@ -23,7 +23,8 @@ Two things in one repo:
 .venv/Scripts/python.exe -m llmorch run --smoke "<task>"          # ...then run the result
 .venv/Scripts/python.exe -m llmorch run --smoke-install "<task>"  # ...installing its deps first
 .venv/Scripts/python.exe -m llmorch run --live --providers all "<task>"
-.venv/Scripts/llmorch.exe                              # a session — the short way in
+llmorch.cmd                                            # a session — the short way in
+.venv/Scripts/llmorch.exe                              # ...same thing, once PATH is set
 .venv/Scripts/llmorch.exe "build a notes app"          # ...with the first thing said
 .venv/Scripts/python.exe -m llmorch chat               # a session, not one shot
 .venv/Scripts/python.exe -m llmorch chat --continue    # ...pick the last one back up
@@ -178,6 +179,11 @@ Each was learned by getting it wrong against a live API.
   binary on the machine with any arguments": every path argument goes through
   `materialize.safe_join`, and a command naming no file from the output folder
   is refused, so what runs is always the project just written.
+- **The Windows shim is proved by CI or not at all.** `llmorch.cmd` cannot run
+  on the machine it was written on, so `test_the_repository_shim_runs_the_cli`
+  picks the shim for its platform and the windows-latest job is what actually
+  exercises the batch file. Changing it without that job passing is changing it
+  blind.
 - **The smoke run never probes a port it did not open.** A port already
   answering before launch belongs to another server, and its 200s would be
   reported as this project working. Detected by connecting, not by binding —
