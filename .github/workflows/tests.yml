@@ -1,0 +1,66 @@
+# The test suite stands in for the live APIs.
+#
+# Nothing in this repository can be checked against Groq or Gemini for free, so
+# every invariant learned from a live 429 is now held in place by a test and
+# nothing else. That makes "the tests ran" a claim worth automating rather than
+# remembering — and worth making on Windows, where three of the invariants in
+# HANDOFF.md were faults that only appear on Windows and were caught by hand.
+#
+# No network is needed: the suite is offline by construction and the demo run
+# below uses the mock provider.
+
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} · python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+
+    strategy:
+      # One platform's failure is information about that platform, so let the
+      # others finish and report rather than cancelling them.
+      fail-fast: false
+      matrix:
+        include:
+          # The floor and the ceiling of the supported range, plus Windows —
+          # the platform whose faults this project keeps discovering the hard way.
+          - os: ubuntu-latest
+            python: "3.11"
+          - os: ubuntu-latest
+            python: "3.13"
+          - os: windows-latest
+            python: "3.12"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Tests
+        run: python -m pytest -q
+
+      # The suite tests the parts. This runs the whole thing: plan, execute
+      # against the mock provider, materialize a folder, check the contract, and
+      # then start what it wrote and drive it over HTTP. Offline, and it exits
+      # non-zero if the assembled project does not serve.
+      - name: Demo run, end to end
+        env:
+          LLMORCH_RUNS_DIR: ${{ runner.temp }}/llmorch-runs
+        run: python -m llmorch run --smoke "build a notes app"

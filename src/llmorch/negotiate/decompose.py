@@ -34,9 +34,11 @@ from typing import Any
 from ..errors import EngineError, LLMOrchError
 from ..engine.salvage import extract_json
 from ..registry.manifest import Manifest
+from ..engine.smoke import INTERPRETERS
 from ..types import (
     ChatRequest,
     InterfaceContract,
+    LaunchSpec,
     Message,
     OutputKind,
     Priority,
@@ -68,6 +70,14 @@ DECOMPOSE_SCHEMA = {
             "properties": {
                 "runtime": {"type": "string"},
                 "notes": {"type": "string"},
+                "launch": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "array", "items": {"type": "string"}},
+                        "port": {"type": ["integer", "null"]},
+                        "ready_path": {"type": "string"},
+                    },
+                },
                 "pages": {"type": "array", "items": {"type": "string"}},
                 "routes": {
                     "type": "array",
@@ -157,6 +167,18 @@ and `runtime` — the OS, interpreter, working directory and launch command the 
 result must actually work under. Be specific; a file is only correct relative \
 to where it runs.
 
+Also emit `launch`, which is `runtime` in a form a program can act on, so the \
+result can be started and checked rather than only written:
+
+- `command`: argv as a list, e.g. ["python", "server.py"] or ["node", "server.js"]. \
+The first entry must be an interpreter — one of: {", ".join(sorted(INTERPRETERS))}. \
+Every other entry naming a file must name a file one of your nodes produces.
+- `port`: the port it listens on, as an integer.
+- `ready_path`: a path that answers once it is up, e.g. "/" or "/health".
+
+Emit `launch` only if the build is a thing that can be started and left running. \
+For a library, a script that exits, or a document, leave it out.
+
 Reply with ONLY a JSON object. No prose, no code fence.
 """
     user = f"The task: {task}\n\nProduce the interface contract and the nodes."
@@ -209,6 +231,7 @@ def parse_interface(payload: dict[str, Any]) -> InterfaceContract:
         data_models=models,
         pages=pages,
         runtime=str(raw.get("runtime") or "")[:2000],
+        launch=LaunchSpec.from_payload(raw.get("launch")),
         notes=str(raw.get("notes") or "")[:4000],
     )
 
@@ -323,6 +346,7 @@ class Decomposition:
                 "data_models": list(self.interface.data_models),
                 "pages": list(self.interface.pages),
                 "runtime": self.interface.runtime,
+                "launch": self.interface.launch.to_dict(),
                 "notes": self.interface.notes,
             },
             "nodes": [

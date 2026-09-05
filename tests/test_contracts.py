@@ -47,7 +47,7 @@ def test_the_reference_artifacts_agree_with_each_other(artifacts):
     report = check_contract(INTERFACE, artifacts)
     assert report.ok, _errors(report)
     assert not report.warnings, [i.what for i in report.warnings]
-    assert len(report.checks_run) == 6
+    assert len(report.checks_run) == 8
 
 
 def test_an_empty_artifact_set_is_not_silently_fine():
@@ -300,3 +300,210 @@ def test_an_unparseable_file_does_not_stop_the_check():
 
 def test_the_reference_artifacts_have_no_call_mismatches(artifacts):
     assert _check(artifacts).ok
+
+
+# ==========================================================================
+# Builds that are not the pinned stack
+#
+# The checks above were written against Python and HTML, and a Node or Go build
+# used to get nothing from any of them. What made them portable was not the
+# matching — a route literal looks the same in every language — but knowing
+# which files are the backend.
+# ==========================================================================
+
+
+NODE_SERVER = """\
+const http = require("http");
+const { loadNotes } = require("./store.js");
+
+http.createServer((req, res) => {
+  if (req.url === "/api/notes") { res.end(JSON.stringify(loadNotes())); }
+  else if (req.url.startsWith("/api/notes/")) { res.end("{}"); }
+  else { res.writeHead(404); res.end(); }
+}).listen(3000);
+"""
+
+NODE_STORE = """\
+const notes = [];
+function loadNotes() { return notes; }
+module.exports = { loadNotes };
+"""
+
+NODE_PAGE = """\
+<!doctype html><html><body><ul id="notes"></ul>
+<script src="app.js"></script></body></html>
+"""
+
+NODE_CLIENT = """\
+fetch("/api/notes").then(r => r.json()).then(render);
+function render(notes) { console.log(notes); }
+"""
+
+NODE_INTERFACE = InterfaceContract(
+    routes=(
+        {"method": "GET", "path": "/api/notes"},
+        {"method": "GET", "path": "/api/notes/{id}"},
+    ),
+    pages=("index.html",),
+)
+
+
+@pytest.fixture
+def node_artifacts():
+    return {
+        "server.js": NODE_SERVER,
+        "store.js": NODE_STORE,
+        "index.html": NODE_PAGE,
+        "app.js": NODE_CLIENT,
+    }
+
+
+def test_a_node_build_that_agrees_with_itself_is_clean(node_artifacts):
+    report = check_contract(NODE_INTERFACE, node_artifacts)
+    assert report.ok, _errors(report)
+    assert not report.warnings, [i.what for i in report.warnings]
+
+
+def test_a_route_no_node_backend_serves_is_caught(node_artifacts):
+    """Used to be invisible: the check only ever read `.py`."""
+    node_artifacts["server.js"] = NODE_SERVER.replace("/api/notes", "/api/note")
+    report = check_contract(NODE_INTERFACE, node_artifacts)
+    assert any("no backend file mentions `/api/notes`" in e for e in _errors(report))
+
+
+def test_the_browser_script_cannot_vouch_for_a_route(node_artifacts):
+    """The failure mode that makes this worth care rather than a wider glob.
+
+    `app.js` fetches `/api/notes`. If it counted as backend the route would
+    always look served and the check could never fail — a pass reported on
+    evidence that has nothing to do with the server.
+    """
+    node_artifacts["server.js"] = (
+        'const http = require("http");\n'
+        'http.createServer((req, res) => res.end("hi")).listen(3000);\n'
+    )
+    del node_artifacts["store.js"]
+
+    report = check_contract(NODE_INTERFACE, node_artifacts)
+
+    assert any("no backend file mentions `/api/notes`" in e for e in _errors(report))
+
+
+def test_a_build_with_no_recognisable_backend_says_nothing(node_artifacts):
+    """The other half of the same rule. With nothing that looks like a server,
+    the honest answer is silence — an accusation here would be made against a
+    file set this cannot see the serving half of."""
+    del node_artifacts["server.js"]
+    del node_artifacts["store.js"]
+
+    report = check_contract(NODE_INTERFACE, node_artifacts)
+
+    assert not any("no backend file mentions" in e for e in _errors(report))
+
+
+def test_a_go_backend_is_read_too():
+    artifacts = {
+        "main.go": (
+            'package main\n'
+            'import "net/http"\n'
+            'func main() {\n'
+            '  http.HandleFunc("/api/notes", list)\n'
+            '  http.ListenAndServe(":8080", nil)\n'
+            '}\n'
+        ),
+    }
+    interface = InterfaceContract(
+        routes=(
+            {"method": "GET", "path": "/api/notes"},
+            {"method": "GET", "path": "/api/health"},
+        )
+    )
+    report = check_contract(interface, artifacts)
+    found = _errors(report)
+    assert any("/api/health" in e for e in found)
+    assert not any("/api/notes" in e for e in found)
+
+
+def test_a_relative_import_naming_nothing_is_caught(node_artifacts):
+    """The JavaScript form of a page linking a stylesheet nobody wrote."""
+    del node_artifacts["store.js"]
+    report = check_contract(NODE_INTERFACE, node_artifacts)
+    assert any(
+        "imports `./store.js`, which no node produced" in e for e in _errors(report)
+    )
+
+
+def test_an_import_without_its_extension_still_resolves(node_artifacts):
+    node_artifacts["server.js"] = NODE_SERVER.replace('"./store.js"', '"./store"')
+    report = check_contract(NODE_INTERFACE, node_artifacts)
+    assert not _errors(report)
+
+
+def test_a_package_import_is_not_this_check_s_business(node_artifacts):
+    """`require("express")` names a package; the smoke run answers for those."""
+    node_artifacts["server.js"] = 'const e = require("express");\n' + NODE_SERVER
+    report = check_contract(NODE_INTERFACE, node_artifacts)
+    assert not any("express" in e for e in _errors(report))
+
+
+def test_importing_a_name_the_module_does_not_export_is_caught(node_artifacts):
+    """Two models, one spec: `loadNotes` written, `getNotes` imported. Both
+    files are correct alone; the result is a TypeError on the first request."""
+    node_artifacts["store.js"] = NODE_STORE.replace(
+        "module.exports = { loadNotes };", "module.exports = { getNotes: loadNotes };"
+    )
+    report = check_contract(NODE_INTERFACE, node_artifacts)
+    assert any(
+        "imports `loadNotes` from `./store.js`, which exports getNotes" in e
+        for e in _errors(report)
+    )
+
+
+def test_esm_named_imports_are_read_as_well(node_artifacts):
+    node_artifacts["server.js"] = NODE_SERVER.replace(
+        'const { loadNotes } = require("./store.js");',
+        'import { missing } from "./store.js";',
+    )
+    node_artifacts["store.js"] = "export function loadNotes() { return []; }\n"
+    report = check_contract(NODE_INTERFACE, node_artifacts)
+    assert any("imports `missing`" in e for e in _errors(report))
+
+
+def test_a_renamed_import_is_judged_on_the_exported_name(node_artifacts):
+    node_artifacts["server.js"] = NODE_SERVER.replace(
+        "const { loadNotes } =", "const { loadNotes: load } ="
+    ).replace("loadNotes()", "load()")
+    report = check_contract(NODE_INTERFACE, node_artifacts)
+    assert not _errors(report)
+
+
+def test_a_module_whose_exports_cannot_be_read_is_left_alone(node_artifacts):
+    """The rule that keeps this from accusing working code: a module doing
+    anything the reader does not fully understand leaves the check entirely."""
+    for exports in (
+        "exports.loadNotes = loadNotes;",
+        "module.exports = { ...base, loadNotes };",
+        "export default { loadNotes };",
+        "const api = { loadNotes };\nexport { api };",
+    ):
+        artifacts = dict(node_artifacts)
+        artifacts["store.js"] = NODE_STORE.replace(
+            "module.exports = { loadNotes };", exports
+        )
+        report = check_contract(NODE_INTERFACE, artifacts)
+        assert not any("imports `loadNotes`" in e for e in _errors(report)), exports
+
+
+def test_arity_is_not_judged_in_javascript(node_artifacts):
+    """Python's check can compare signatures because `ast` gives it exact ones.
+    JavaScript defaults, rest parameters and options objects mean a regex would
+    report working code as broken, so the name is where this stops."""
+    node_artifacts["store.js"] = (
+        "function loadNotes(limit = 10, ...rest) { return []; }\n"
+        "module.exports = { loadNotes };\n"
+    )
+    node_artifacts["server.js"] = NODE_SERVER.replace(
+        "loadNotes()", "loadNotes(1, 2, 3, 4)"
+    )
+    report = check_contract(NODE_INTERFACE, node_artifacts)
+    assert not _errors(report)

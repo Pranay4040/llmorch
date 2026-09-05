@@ -12,7 +12,14 @@ target.
 
 from __future__ import annotations
 
-from ..types import InterfaceContract, OutputKind, Role, SplitHint, TaskNode
+from ..types import (
+    InterfaceContract,
+    LaunchSpec,
+    OutputKind,
+    Role,
+    SplitHint,
+    TaskNode,
+)
 
 TASK = "build a notes app"
 
@@ -41,6 +48,7 @@ INTERFACE = InterfaceContract(
         "is the working directory and the document root. Path handling must "
         "be correct with both / and \\ separators."
     ),
+    launch=LaunchSpec(command=("python", "server.py"), port=8000, ready_path="/"),
     notes=(
         "Plain HTML/CSS/JS with no framework and no build step. "
         "Backend is Python's stdlib http.server over SQLite. "

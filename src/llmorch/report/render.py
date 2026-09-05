@@ -14,6 +14,7 @@ if TYPE_CHECKING:  # pragma: no cover - doctor imports providers; keep it lazy
     from ..engine.checkpoint import Checkpoint
     from ..discover import Discovery
     from ..engine.contracts import ContractReport
+    from ..engine.smoke import SmokeReport
 
 
 def _bar(used: int, limit: int | None, width: int = 20) -> str:
@@ -250,7 +251,7 @@ def render_contracts(report: "ContractReport") -> str:
     if not report.issues:
         lines.append(
             f"  {len(report.checks_run)} cross-artifact checks passed: "
-            "pages exist, assets resolve, calls match declared routes"
+            + ", ".join(report.checks_run)
         )
         return "\n".join(lines)
 
@@ -264,6 +265,88 @@ def render_contracts(report: "ContractReport") -> str:
     lines.append(
         f"  {len(report.errors)} mismatch(es), {len(report.warnings)} warning(s) "
         "across artifacts written by different models"
+    )
+    return "\n".join(lines)
+
+
+def _stderr_block(text: str, limit: int = 12) -> list[str]:
+    """The captured stderr, keeping both ends when it is too long for one.
+
+    A tail alone is the wrong half for the most common case: Node puts
+    `Cannot find module` on the first line and thirty frames of stack after it,
+    so twelve lines from the bottom show the stack and lose the cause.
+    """
+    lines = [line for line in text.splitlines() if line.strip()]
+    if len(lines) <= limit:
+        body = lines
+    else:
+        head = (limit + 1) // 2
+        elision = f"... {len(lines) - limit} more lines ..."
+        body = lines[:head] + [elision] + lines[head - limit :]
+    return [f"    {line}" for line in body]
+
+
+def render_smoke(report: "SmokeReport") -> str:
+    """What happened when the generated project was actually run.
+
+    A skip is printed as a skip, never as a pass. The whole value of this step is
+    that it is the only evidence in the run that came from executing the code,
+    so "we did not get to find out" must not read like "it works".
+    """
+    lines = ["", "Smoke run", "=" * 78]
+
+    if not report.ran:
+        # A skip and a crash both leave `ran` False and mean opposite things:
+        # one is no evidence, the other is the worst evidence there is.
+        if report.skipped:
+            lines.append(f"  skipped — {report.skipped}")
+        else:
+            lines.append(
+                f"  {report.entrypoint or 'the project'} never reached a serving state"
+            )
+        for issue in report.errors + report.warnings:
+            mark = "FAIL" if issue.severity == "error" else "warn"
+            lines.append(f"  [{mark}] {issue.what}")
+            if issue.why:
+                lines.append(f"         {issue.why}")
+        if report.stderr_tail:
+            lines.append("  " + "-" * 74)
+            lines.append("  stderr:")
+            lines += _stderr_block(report.stderr_tail)
+        return "\n".join(lines)
+
+    if report.installed:
+        lines.append(f"  {report.installed}")
+    lines.append(f"  {report.entrypoint} on http://127.0.0.1:{report.port}")
+    for probe in report.probes:
+        status = str(probe.status) if probe.status is not None else "---"
+        note = f"  {probe.detail}" if probe.status is None and probe.detail else ""
+        lines.append(f"    {status:>4}  {probe.label}{note}")
+
+    if not report.issues:
+        lines.append("  " + "-" * 74)
+        lines.append(
+            f"  {len(report.probes)} request(s), no server-side failures — "
+            "the assembled project runs"
+        )
+        return "\n".join(lines)
+
+    lines.append("  " + "-" * 74)
+    for issue in report.errors + report.warnings:
+        mark = "FAIL" if issue.severity == "error" else "warn"
+        lines.append(f"  [{mark}] {issue.what}")
+        if issue.why:
+            lines.append(f"         {issue.why}")
+
+    if report.stderr_tail:
+        lines.append("  " + "-" * 74)
+        lines.append("  stderr:")
+        lines += _stderr_block(report.stderr_tail)
+
+    lines.append("  " + "-" * 74)
+    lines.append(
+        f"  {len(report.errors)} failure(s), {len(report.warnings)} warning(s) "
+        f"across {len(report.probes)} request(s)"
     )
     return "\n".join(lines)
 

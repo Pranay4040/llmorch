@@ -1,5 +1,7 @@
 # llmorch
 
+[![tests](https://github.com/Pranay4040/llmorch/actions/workflows/tests.yml/badge.svg)](https://github.com/Pranay4040/llmorch/actions/workflows/tests.yml)
+
 **Quota governance for applications that call several LLM providers** — plus an
 orchestrator built on top of it, as the worked example.
 
@@ -113,8 +115,49 @@ runnable project folder:
 ```bash
 llmorch run "build a notes app"                  # mock provider, no network
 llmorch run --live --providers all "build a CLI that converts CSV to markdown"
+llmorch run --smoke "build a notes app"          # ...and then run what it wrote
 llmorch resume <run_id>                          # after a quota wall
 ```
+
+`--smoke` starts the generated project, drives the contract's pages and routes
+against it over HTTP, and reports what came back. How to start it is part of the
+contract the planner emits, so it is stated rather than guessed:
+
+```json
+"launch": {"command": ["node", "server.js"], "port": 3000, "ready_path": "/"}
+```
+
+The command is checked before it runs: the program must be a known interpreter,
+and every path in it must resolve inside the output folder, through the same
+containment check that writing those files used. A command that fails either
+test is refused by name — never quietly replaced with a guess.
+
+A project with dependencies gets `--smoke-install`, which runs a lockfile-pinned
+install first — `npm ci --ignore-scripts` and its pnpm and yarn equivalents. The
+recipe is chosen by which lockfile the build produced, not by anything a model
+said, and package install scripts stay disabled. Without that flag, a project
+needing an install is skipped with the command that would fix it, rather than
+being started into a folder where it can only fail. It is off by default and has
+to be asked for: every other step in the system treats model output as untrusted
+data, and this one hands it the interpreter. What it buys is the only evidence in
+a run that did not come from reading the code — a project whose files all parse,
+all pass review, and all agree with each other can still serve every page from
+the wrong directory, and nothing static will say so.
+
+Before any of that, eight deterministic checks read the finished artifacts as a
+set rather than one at a time — the pages the contract promised exist, the assets
+and modules they reference were written, the frontend calls only declared routes,
+the backend mentions every declared route, and the modules agree with each other
+on names and signatures. They cost no requests and they catch the failure a split
+build makes likely and a single author never would: every file impeccable against
+its own spec, and the project broken because two models agreed with the spec and
+not with each other.
+
+Each run leaves `runs/<run_id>/report.md` next to the folder it produced —
+verdict first, then which model wrote which file, what the quota bought, how
+evenly the work landed, and what the checks and the smoke run found. The
+artifacts stay on disk indefinitely and look equally plausible either way; the
+evidence about them should not be the one part that lives in scrollback.
 
 Supporting commands: `doctor --probe` (verify wire names before depending on
 them), `discover` (ask a key which models it can reach, spending no tokens),
@@ -130,3 +173,8 @@ Current state, what is next, and the invariants not to break are in
 pip install -e ".[dev]"
 python -m pytest -q
 ```
+
+CI runs that suite on Linux (3.11 and 3.13) and Windows (3.12), then does a full
+offline demo run with `--smoke` — plan, execute against the mock provider, write
+the folder, and start what it wrote. Windows is in the matrix on purpose: three
+of the invariants this project holds were faults that only appear there.

@@ -38,6 +38,7 @@ from .engine.contracts import artifacts_from_results, check_contract
 from .engine.graph import TaskGraph
 from .engine.materialize import materialize
 from .engine.scheduler import Scheduler
+from .engine.smoke import smoke_run
 from .engine.worker import WorkerDeps
 from .errors import LLMOrchError
 from .providers.base import ProviderRegistry
@@ -52,6 +53,7 @@ from .quota.governor import Governor
 from .quota.store import DayUsage, LedgerStore, restore_governor
 from .registry.manifest import Manifest, load_manifest
 from .types import InterfaceContract
+from .report.document import REPORT_NAME, render_run_report
 from .report.ledger import render_day_usage, render_recent, render_restored
 from .report.render import (
     render_contracts,
@@ -61,6 +63,7 @@ from .report.render import (
     render_outcome,
     render_plan,
     render_quota,
+    render_smoke,
     render_spend,
     render_warnings,
 )
@@ -489,6 +492,37 @@ def _execute(session: Session, args, *, resume: Checkpoint | None = None) -> int
     )
     print(render_contracts(contract))
 
+    # The only check that runs the code rather than reading it. Opt-in: every
+    # other step treats model output as untrusted data, and this one hands it
+    # the interpreter.
+    smoke = None
+    wants_install = getattr(args, "smoke_install", False)
+    if getattr(args, "smoke", False) or wants_install:
+        smoke = smoke_run(
+            config.output_dir,
+            session.scheduler.blackboard.interface,
+            install=wants_install,
+        )
+        print(render_smoke(smoke))
+
+    # The same findings, written down. Everything above this line lives in
+    # scrollback; the artifacts it describes live on disk indefinitely.
+    report_path = config.run_dir / REPORT_NAME
+    report_path.write_text(
+        render_run_report(
+            config=config,
+            graph=session.graph,
+            plan=plan,
+            outcome=outcome,
+            materialized=report,
+            contract=contract,
+            smoke=smoke,
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    print(f"  {report_path}")
+
     print(render_warnings(outcome.warnings))
 
     if outcome.degraded:
@@ -502,6 +536,10 @@ def _execute(session: Session, args, *, resume: Checkpoint | None = None) -> int
     print(f"  python {config.output_dir / 'server.py'}")
     print("  then open http://localhost:8000")
 
+    # A project that was executed and failed is a failed run, even when every
+    # node reported success — that gap is the whole reason this step exists.
+    if smoke is not None and smoke.ran and smoke.errors:
+        return 1
     return 0 if outcome.all_succeeded else 1
 
 
@@ -541,6 +579,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="whether models bid on nodes before assignment (default: auto)",
     )
     run.add_argument("--review", choices=["off", "code", "all"], default="code")
+    run.add_argument(
+        "--smoke",
+        action="store_true",
+        help="start the generated project and drive its routes and pages "
+        "(runs model-written code; off by default)",
+    )
+    run.add_argument(
+        "--smoke-install",
+        action="store_true",
+        help="--smoke, plus a lockfile-pinned dependency install first "
+        "(reaches the network; package install scripts stay disabled)",
+    )
     run.add_argument("--allow-paid", action="store_true")
     run.add_argument("--max-usd", type=float, default=0.0)
     run.add_argument("--max-nodes", type=int, default=10)
@@ -559,6 +609,16 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--providers", default=DEFAULT_LIVE_PROVIDERS)
     resume.add_argument("--explain", action="store_true")
     resume.add_argument("--review", choices=["off", "code", "all"], default="code")
+    resume.add_argument(
+        "--smoke",
+        action="store_true",
+        help="start the completed project and drive it (runs model-written code)",
+    )
+    resume.add_argument(
+        "--smoke-install",
+        action="store_true",
+        help="--smoke, plus a lockfile-pinned dependency install first",
+    )
     resume.add_argument("--max-nodes", type=int, default=10)
     resume.add_argument("--concurrency", type=int, default=4)
     resume.set_defaults(func=cmd_resume, task=None)

@@ -31,6 +31,11 @@ CANNED_PLAN = json.dumps(
                 "document root."
             ),
             "notes": "Plain HTML/CSS/JS, stdlib http.server, SQLite.",
+            "launch": {
+                "command": ["python", "server.py"],
+                "port": 8000,
+                "ready_path": "/",
+            },
             "pages": ["index.html"],
             "routes": [{"method": "GET", "path": "/api/items", "returns": "Item[]"}],
             "data_models": [
