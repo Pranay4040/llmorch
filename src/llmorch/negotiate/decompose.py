@@ -129,6 +129,72 @@ DECOMPOSE_SCHEMA = {
 }
 
 
+# A revision reuses the node schema exactly. The interface is optional here
+# because a revision answers about a change: `merge_interfaces` folds whatever
+# comes back into the standing contract rather than replacing it.
+REVISE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "interface": DECOMPOSE_SCHEMA["properties"]["interface"],
+        "nodes": DECOMPOSE_SCHEMA["properties"]["nodes"],
+    },
+    "required": ["nodes"],
+}
+
+
+def build_revise_prompt(
+    instruction: str,
+    *,
+    memory: str,
+    interface_text: str,
+    max_nodes: int,
+    max_node_tokens: int,
+    roles: list[str],
+) -> tuple[str, str]:
+    """Return (system, user) for a change to a project that already exists.
+
+    The difference from planning fresh is the instruction to emit *only* what
+    changes. A revision that re-plans the whole build would rewrite six files to
+    add a field to one, spending the quota of a new project to make a small
+    edit — and every rewritten file is a fresh chance for a model to disagree
+    with the ones it is not rewriting.
+    """
+    system = f"""\
+You are changing a project that already exists. Several different models will \
+carry out the change, each writing exactly one whole file, none of them able to \
+talk to each other.
+
+Emit ONLY the nodes whose files must be written or rewritten for this change. A \
+file that does not need to change must not appear. Reusing an existing file's \
+`output_path` means that file is rewritten completely — there are no patches, \
+so a node that rewrites a file must produce the whole thing, including the \
+parts that are not changing.
+
+Hard constraints — properties of the machine, not preferences:
+
+- At most {max_nodes} nodes, and no node may need more than {max_node_tokens} \
+tokens of output. A node over the ceiling can never be run at all.
+- `role` must be one of: {", ".join(roles)}.
+- `deps` lists node ids that must finish first, and may name nodes from earlier \
+turns. No cycles.
+- `needs` lists what a node reads from upstream, as "<node_id>.summary". You may \
+name a node from an earlier turn; you will get its summary, never its contents.
+- `est_output_tokens` must cover the WHOLE file being rewritten, not the size of \
+the change.
+
+In `interface`, emit only what the change adds or alters. What you leave out is \
+kept as it is, so there is no need to restate the parts that do not move.
+
+Reply with ONLY a JSON object. No prose, no code fence.
+"""
+    user = (
+        f"{memory}\n\n{interface_text}\n\n"
+        f"## The change now being asked for\n\n{instruction}\n\n"
+        "Produce the nodes this change requires."
+    )
+    return system, user
+
+
 def build_decompose_prompt(
     task: str, *, max_nodes: int, max_node_tokens: int, roles: list[str]
 ) -> tuple[str, str]:
@@ -442,6 +508,94 @@ async def decompose(
     if not isinstance(payload, dict):
         raise DecomposeError(
             f"{model_id} did not return a usable plan (no JSON object in the reply)"
+        )
+
+    return Decomposition(
+        nodes=parse_nodes(payload, max_nodes=max_nodes, max_node_tokens=max_node_tokens),
+        interface=parse_interface(payload),
+        model_id=model_id,
+        usage=response.usage,
+    )
+
+
+async def revise(
+    instruction: str,
+    *,
+    deps,
+    model_id: str,
+    memory: str,
+    interface_text: str,
+    max_nodes: int = 10,
+) -> Decomposition:
+    """Ask one model what must change, given what already exists.
+
+    Same governed path, same priority and same failure handling as `decompose` —
+    a revision is the request the rest of the turn depends on, exactly as the
+    first plan was.
+    """
+    manifest: Manifest = deps.manifest
+    model = manifest.model(model_id)
+    provider_name = manifest.vendor_of(model_id)
+    max_node_tokens = min(m.max_output for m in manifest.enabled_models)
+
+    system, user = build_revise_prompt(
+        instruction,
+        memory=memory,
+        interface_text=interface_text,
+        max_nodes=max_nodes,
+        max_node_tokens=max_node_tokens,
+        roles=[r.value for r in Role],
+    )
+    est_prompt = deps.estimator.estimate_prompt(
+        system=system, messages=[user], provider=provider_name
+    )
+    max_tokens = min(
+        model.max_output, max(model.min_output_tokens, DECOMPOSE_MAX_TOKENS)
+    )
+
+    ticket = deps.governor.try_acquire(
+        model_id, est_prompt, max_tokens, priority=Priority.HIGH
+    )
+    if not isinstance(ticket, Ticket):
+        raise DecomposeError(
+            f"cannot plan the change with {model_id}: "
+            f"{getattr(ticket, 'reason', 'refused')}"
+        )
+
+    request = ChatRequest(
+        model_id=model_id,
+        messages=(Message("user", "[revise]\n" + user),),
+        system=system,
+        max_tokens=max_tokens,
+        json_schema=REVISE_SCHEMA if model.supports_json_schema else None,
+    )
+
+    try:
+        response = await deps.registry.get(model_id).chat(request)
+    except LLMOrchError as exc:
+        deps.governor.release(ticket, "revise failed")
+        raise DecomposeError(f"{model_id} could not plan the change: {exc}") from exc
+
+    deps.governor.commit(ticket, response.usage)
+    deps.estimator.observe(provider_name, response.usage.prompt_tokens, est_prompt)
+    if response.rate_limit:
+        deps.governor.sync_from_headers(model_id, response.rate_limit)
+
+    payload = extract_json(response.text)
+    if not isinstance(payload, dict):
+        raise DecomposeError(
+            f"{model_id} did not return a usable change (no JSON object in the reply)"
+        )
+
+    # "Nothing needs to change" is a legitimate answer to a change request, and
+    # a different thing from a malformed plan. Planning fresh keeps the stricter
+    # rule: a *build* that produced no nodes did fail.
+    if isinstance(payload.get("nodes"), list) and not payload["nodes"]:
+        return Decomposition(
+            nodes=[],
+            interface=parse_interface(payload),
+            model_id=model_id,
+            usage=response.usage,
         )
 
     return Decomposition(

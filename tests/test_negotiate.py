@@ -25,7 +25,9 @@ from llmorch.negotiate.bidding import BID_SYSTEM, collect_bids, parse_bids, shou
 from llmorch.negotiate.decompose import (
     DecomposeError,
     Decomposition,
+    build_revise_prompt,
     decompose,
+    revise,
     parse_interface,
     parse_nodes,
     pick_planner,
@@ -300,6 +302,84 @@ async def test_a_live_decomposition_produces_a_runnable_graph(manifest):
     assert [n.id for n in plan.nodes] == ["server", "page"]
     assert plan.model_id == GEMINI
     assert "Windows" in plan.interface.runtime
+
+
+async def test_a_revision_plans_only_what_changes(manifest):
+    """The point of the whole conversation path: a change to one file must not
+    cost a rewrite of six, and must not be a fresh plan under a new name."""
+    provider = MockProvider()
+    deps = _deps(manifest, provider)
+
+    change = await revise(
+        "add a detail link",
+        deps=deps,
+        model_id=GEMINI,
+        memory="## What you have been asked so far\n\n1. build a notes app",
+        interface_text="## Interface contract",
+        max_nodes=5,
+    )
+
+    assert [n.id for n in change.nodes] == ["page"]
+    assert change.nodes[0].output_path == "index.html"
+    assert change.model_id == GEMINI
+
+
+def test_a_revision_prompt_carries_the_memory_and_the_contract():
+    """What the planner is told: the instructions, the project as summaries, the
+    shared contract — and the rule that it must emit only what changes."""
+    system, user = build_revise_prompt(
+        "add a detail link",
+        memory="## The project as it stands\n\n- `server.py` (backend) — the API",
+        interface_text="## Interface contract\n\nRoutes:\n  GET /api/notes",
+        max_nodes=5,
+        max_node_tokens=1300,
+        roles=["backend", "frontend"],
+    )
+
+    assert "ONLY the nodes whose files must be written or rewritten" in system
+    assert "never its contents" in system
+    assert "`server.py` (backend) — the API" in user
+    assert "GET /api/notes" in user
+    assert "add a detail link" in user
+
+
+async def test_a_revision_can_conclude_that_nothing_changes(manifest):
+    """A legitimate answer to a change request, and a different thing from a
+    malformed plan — planning fresh keeps the stricter rule."""
+    provider = MockProvider(revise_response='{"nodes": []}')
+    deps = _deps(manifest, provider)
+
+    change = await revise(
+        "looks good",
+        deps=deps,
+        model_id=GEMINI,
+        memory="",
+        interface_text="",
+        max_nodes=5,
+    )
+
+    assert change.nodes == []
+
+
+async def test_a_build_that_produces_no_nodes_still_fails(manifest):
+    provider = MockProvider(plan_response='{"nodes": []}')
+    deps = _deps(manifest, provider)
+    with pytest.raises(DecomposeError):
+        await decompose("build a thing", deps=deps, model_id=GEMINI, max_nodes=5)
+
+
+async def test_a_revision_that_answers_with_prose_is_refused(manifest):
+    provider = MockProvider(revise_response="Sure, I'll change that for you!")
+    deps = _deps(manifest, provider)
+    with pytest.raises(DecomposeError):
+        await revise(
+            "change it",
+            deps=deps,
+            model_id=GEMINI,
+            memory="",
+            interface_text="",
+            max_nodes=5,
+        )
 
 
 async def test_a_planner_that_answers_with_prose_is_refused(manifest):

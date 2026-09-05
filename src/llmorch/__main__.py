@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from .config import RunConfig, load_dotenv, state_db_path
+from .config import RunConfig, load_dotenv, runs_dir, state_db_path
 from .dashboard.server import DEFAULT_PORT, serve
 from .demo.website import ARTIFACTS, INTERFACE, SUMMARIES, TASK, build_nodes
 from .discover import discover_all
@@ -36,6 +36,7 @@ from .engine.checkpoint import (
 )
 from .engine.contracts import artifacts_from_results, check_contract
 from .engine.graph import TaskGraph
+from .chat import Conversation, latest_session, merge_interfaces
 from .engine.materialize import materialize
 from .engine.scheduler import Scheduler
 from .engine.smoke import smoke_run
@@ -47,7 +48,13 @@ from .providers.openai_compat import build_live_registry
 from .quota.estimator import TokenEstimator
 from .negotiate import plancache
 from .negotiate.bidding import collect_bids, should_bid
-from .negotiate.decompose import DecomposeError, decompose, pick_planner, plan_signature
+from .negotiate.decompose import (
+    DecomposeError,
+    decompose,
+    pick_planner,
+    plan_signature,
+    revise,
+)
 from .negotiate.profiles import Profiles
 from .quota.governor import Governor
 from .quota.store import DayUsage, LedgerStore, restore_governor
@@ -163,6 +170,36 @@ def _plan(
     """
     task = config.task.strip()
     force = getattr(args, "decompose", False)
+
+    # A change to a project that already exists is planned against what that
+    # project is, and never against the cache or the demo graph: the same
+    # sentence means something different on turn four than it did on turn one.
+    history: Conversation | None = getattr(args, "history", None)
+    if history is not None and history.started:
+        deps = _worker_deps(
+            manifest=manifest, governor=governor, registry=registry,
+            estimator=estimator, profiles=profiles, store=store, config=config,
+            interface=history.interface,
+        )
+        planner = pick_planner(manifest, sorted(registry.model_ids))
+        if planner is None:
+            raise DecomposeError("no model available to plan this change")
+        change = asyncio.run(
+            revise(
+                task,
+                deps=deps,
+                model_id=planner,
+                memory=history.render_memory(),
+                interface_text=Blackboard(interface=history.interface).interface_text(),
+                max_nodes=config.max_nodes,
+            )
+        )
+        return (
+            change.nodes,
+            merge_interfaces(history.interface, change.interface),
+            f"{planner} planned {len(change.nodes)} change(s) against "
+            f"{len(history.files)} existing file(s)",
+        )
 
     if stored_plan:
         # A resume runs the graph it was interrupted in the middle of. Planning
@@ -415,6 +452,138 @@ def cmd_resume(args) -> int:
         session.close()
 
 
+CHAT_HELP = """\
+  <anything else>   an instruction: the first builds, the rest change what is built
+  /files            what the project consists of now
+  /history          what you have asked so far
+  /report           where this session's report.md is
+  /quit             leave (the conversation is saved after every turn)
+"""
+
+
+# What the contract checker can read, and nothing else. `--smoke-install` may
+# have put a node_modules of tens of thousands of files in this folder, and a
+# smoke run may have left a SQLite file: walking either is a waste at best.
+_READABLE = (".py", ".js", ".mjs", ".ts", ".html", ".htm", ".css", ".sql", ".json")
+_SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "vendor", "dist"}
+_MAX_READ_BYTES = 400_000
+
+
+def _read_output(output_dir: Path) -> dict[str, str]:
+    """What is on disk now, as the contract checker wants it.
+
+    Read from the folder rather than from memory because the folder is the
+    truth: it holds what every earlier turn wrote, including the turns that ran
+    in a previous process.
+    """
+    if not output_dir.is_dir():
+        return {}
+
+    files: dict[str, str] = {}
+    for path in sorted(output_dir.rglob("*")):
+        if not path.is_file() or path.name == "README.md":
+            continue
+        relative = path.relative_to(output_dir)
+        if _SKIP_DIRS.intersection(relative.parts):
+            continue
+        if path.suffix.lower() not in _READABLE:
+            continue
+        try:
+            if path.stat().st_size > _MAX_READ_BYTES:
+                continue
+            files[relative.as_posix()] = path.read_text(
+                encoding="utf-8", errors="replace"
+            )
+        except OSError:
+            continue
+    return files
+
+
+def _chat_command(line: str, history: Conversation, config_dir: Path) -> bool:
+    """Handle a `/command`. Returns False when the session should end."""
+    command = line.split()[0].lower()
+
+    if command in ("/quit", "/exit", "/q"):
+        return False
+    if command in ("/help", "/?"):
+        print(CHAT_HELP)
+    elif command == "/files":
+        if not history.files:
+            print("  nothing built yet")
+        for path in sorted(history.files):
+            note = history.files[path]
+            print(f"  {path:<20} {note.role:<10} {note.summary.splitlines()[0][:44]}")
+    elif command == "/history":
+        for index, turn in enumerate(history.turns, start=1):
+            degraded = f"  ({len(turn.degraded)} degraded)" if turn.degraded else ""
+            print(f"  {index}. {turn.instruction}{degraded}")
+    elif command == "/report":
+        print(f"  {config_dir / REPORT_NAME}")
+    else:
+        print(f"  unknown command {command}; /help lists them")
+    return True
+
+
+def cmd_chat(args) -> int:
+    """A session with the orchestrator rather than one shot at it."""
+    session_id = args.session or (latest_session() if args.continue_ else None)
+    history = Conversation.load(session_id) if session_id else None
+    if history is None:
+        history = Conversation(session_id=session_id or _run_id())
+        print(f"New session {history.session_id}.")
+    else:
+        print(
+            f"Resuming {history.session_id}: {len(history.turns)} turn(s), "
+            f"{len(history.files)} file(s)."
+        )
+
+    print("Type an instruction, or /help. Ctrl-D to leave.\n")
+    run_dir = runs_dir() / history.session_id
+
+    while True:
+        try:
+            line = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not line:
+            continue
+        if line.startswith("/"):
+            if not _chat_command(line, history, run_dir):
+                break
+            continue
+
+        args.task = line
+        args.history = history
+        prior = _read_output(run_dir / "output")
+
+        try:
+            session = _setup(args, run_id=history.session_id)
+        except LLMOrchError as exc:
+            print(f"  {exc}")
+            continue
+
+        try:
+            if session.graph.nodes:
+                _execute(session, args, prior=prior, history=history)
+            else:
+                # The planner read the instruction and concluded the project
+                # already satisfies it. Recorded, so the next turn knows it was
+                # said and `/history` shows it.
+                print("  nothing to change")
+                history.record(
+                    line, {}, {}, session.scheduler.blackboard.interface
+                )
+                history.save()
+        except LLMOrchError as exc:
+            print(f"  {exc}")
+        finally:
+            session.close()
+
+    print(f"Session {history.session_id} saved to {history.path}")
+    return 0
+
+
 def _bid(session: Session, args) -> list:
     """Run a bidding round if it would actually inform the assignment.
 
@@ -445,8 +614,22 @@ def _bid(session: Session, args) -> list:
     return bids
 
 
-def _execute(session: Session, args, *, resume: Checkpoint | None = None) -> int:
-    """Plan, run, report, and write the output folder."""
+def _execute(
+    session: Session,
+    args,
+    *,
+    resume: Checkpoint | None = None,
+    prior: dict[str, str] | None = None,
+    history: Conversation | None = None,
+) -> int:
+    """Plan, run, report, and write the output folder.
+
+    `prior` is what earlier turns of a conversation already wrote. It matters
+    only to the contract check, which asks whether the artifacts agree with each
+    other: given one turn's three changed files it would report the other five
+    pages as missing, which is the checker looking at a fragment and describing
+    it as the project.
+    """
     config = session.config
     mode = (
         "dry run — mock provider, no network"
@@ -488,7 +671,7 @@ def _execute(session: Session, args, *, resume: Checkpoint | None = None) -> int
         # CSV tool for the notes app's routes reports five faults that are only
         # the checker looking at the wrong document.
         session.scheduler.blackboard.interface,
-        artifacts_from_results(session.graph.nodes, outcome.results),
+        {**(prior or {}), **artifacts_from_results(session.graph.nodes, outcome.results)},
     )
     print(render_contracts(contract))
 
@@ -535,6 +718,15 @@ def _execute(session: Session, args, *, resume: Checkpoint | None = None) -> int
     print("\nRun the result:")
     print(f"  python {config.output_dir / 'server.py'}")
     print("  then open http://localhost:8000")
+
+    if history is not None:
+        history.record(
+            config.task,
+            session.graph.nodes,
+            outcome.results,
+            session.scheduler.blackboard.interface,
+        )
+        history.save()
 
     # A project that was executed and failed is a failed run, even when every
     # node reported success — that gap is the whole reason this step exists.
@@ -622,6 +814,30 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--max-nodes", type=int, default=10)
     resume.add_argument("--concurrency", type=int, default=4)
     resume.set_defaults(func=cmd_resume, task=None)
+
+    chat = sub.add_parser(
+        "chat", help="a session: the first instruction builds, the rest change it"
+    )
+    chat.add_argument("--session", default=None, help="continue a specific session id")
+    chat.add_argument(
+        "--continue",
+        dest="continue_",
+        action="store_true",
+        help="continue the most recent session",
+    )
+    chat.add_argument("--live", action="store_true", help="use real providers")
+    chat.add_argument("--providers", default=DEFAULT_LIVE_PROVIDERS)
+    chat.add_argument("--review", choices=["off", "code", "all"], default="code")
+    chat.add_argument(
+        "--smoke",
+        action="store_true",
+        help="after each turn, start the project and drive it",
+    )
+    chat.add_argument("--smoke-install", action="store_true")
+    chat.add_argument("--max-nodes", type=int, default=10)
+    chat.add_argument("--concurrency", type=int, default=4)
+    chat.add_argument("--explain", action="store_true")
+    chat.set_defaults(func=cmd_chat, task=None, negotiate="auto")
 
     plan = sub.add_parser("plan", help="show the assignment without executing")
     plan.add_argument("task", nargs="?", default=None)
