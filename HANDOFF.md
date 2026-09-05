@@ -1,6 +1,6 @@
 # llmorch — handoff
 
-**State:** M0–M6 done, plus the smoke run. 542 tests pass, 1 skipped on Windows
+**State:** M0–M6 done, plus the smoke run. 563 tests pass, 1 skipped on Windows
 (a symlink test needing admin). Published at github.com/Pranay4040/llmorch,
 tagged `v0.1.0`.
 
@@ -18,11 +18,13 @@ Two things in one repo:
 ## Run it
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q                  # 542 tests, no network
+.venv/Scripts/python.exe -m pytest -q                  # 563 tests, no network
 .venv/Scripts/python.exe -m llmorch run "build a notes app"        # mock, offline
 .venv/Scripts/python.exe -m llmorch run --smoke "<task>"          # ...then run the result
 .venv/Scripts/python.exe -m llmorch run --smoke-install "<task>"  # ...installing its deps first
 .venv/Scripts/python.exe -m llmorch run --live --providers all "<task>"
+.venv/Scripts/python.exe -m llmorch chat               # a session, not one shot
+.venv/Scripts/python.exe -m llmorch chat --continue    # ...pick the last one back up
 .venv/Scripts/python.exe -m llmorch resume <run_id>    # after a quota wall
 .venv/Scripts/python.exe -m llmorch doctor --probe     # verify wire names live
 .venv/Scripts/python.exe -m llmorch discover           # what each key can reach
@@ -56,26 +58,32 @@ spends quota.
 
 Ordered by value. Issues #1–#4 are filed on GitHub.
 
-1. **Arity agreement in JavaScript** (#1, the half still open). Routes, imports
+1. **Telling an instruction from a remark.** `llmorch chat` plans every line as
+   a change, so "what does this do?" or "looks good" spends a planning request
+   before anything can notice it asked for nothing. The planner answering with
+   zero nodes is handled — the turn says "nothing to change" and records it —
+   but the request is spent by then, and against 250 a day that is the cost
+   worth removing.
+2. **Arity agreement in JavaScript** (#1, the half still open). Routes, imports
    and imported names now work for JS and Go; what `check_python_calls` does and
    nothing else can is compare *signatures*. `ast` gives Python exact ones, and
    JavaScript defaults, rest parameters and destructured options objects mean a
    regex would report working code as broken. This needs a real parser, which
    means a dependency this project has so far refused — and the missed fault is
    cheaper than the false accusation, so it stays open on purpose.
-2. **A compiled build step, if it is ever worth it.** `--smoke-install` covers
+3. **A compiled build step, if it is ever worth it.** `--smoke-install` covers
    the Node case: a lockfile is enough to install from, and the recipe is
    inferred from which lockfile exists rather than declared by a model. What is
    still not covered is anything needing a *compile* — a Go binary, a TypeScript
    build — and the case for adding it is weaker than it looks: `go run` already
    fetches and compiles, and a build step is where an arbitrary command would
    have to come back in. Worth doing only when a real plan is blocked by it.
-3. **Paid providers** (#2). DeepSeek, Moonshot, Fireworks, OpenCode Zen are
+4. **Paid providers** (#2). DeepSeek, Moonshot, Fireworks, OpenCode Zen are
    discovered and undeclared. OpenCode Zen fronts Claude and GPT families, so it
    would reopen the roster the way OpenRouter did. Blocked on *verified*
    pricing — the manifest rejects a paid provider with no cost, and inventing
    numbers to satisfy that check defeats it.
-4. **Gemini's daily limit** (#4) and **the Mistral/Wafer keys** (#3).
+5. **Gemini's daily limit** (#4) and **the Mistral/Wafer keys** (#3).
 
 ## Do not break these
 
@@ -121,6 +129,22 @@ Each was learned by getting it wrong against a live API.
   anything is started, so the report says so — and a process that dies naming a
   module nobody installed gets the same attribution rather than reading as the
   model writing a bad import.
+- **A conversation remembers summaries, never file contents.** Feeding the
+  artifacts back to the planner would grow every prompt with the project rather
+  than with the request, against a 6,000 TPM ceiling. What a turn remembers is
+  what the blackboard already passes between nodes: the instructions, the
+  contract, and one summary per file — written by the model that wrote the file,
+  in the same response, so it cost nothing extra.
+- **A revision adds to the contract, it does not replace it.** A planner asked
+  about a change answers about the change; a revision that adds one route and
+  does not restate the other three is describing an addition. Replacing would
+  silently unserve the other three, and every check downstream measures the
+  artifacts against this contract, so it would report the wrong thing with total
+  confidence.
+- **A turn's contract check sees the whole folder, not the turn's delta.** Given
+  one turn's three changed files it would otherwise report the other five pages
+  as missing — the checker looking at a fragment and describing it as the
+  project.
 - **`report.md` recomputes nothing and holds no key.** Every figure comes from
   the same objects the terminal renderers read, so the file and the screen
   cannot disagree about what happened; and it is as publishable as the output

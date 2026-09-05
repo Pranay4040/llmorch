@@ -116,8 +116,18 @@ runnable project folder:
 llmorch run "build a notes app"                  # mock provider, no network
 llmorch run --live --providers all "build a CLI that converts CSV to markdown"
 llmorch run --smoke "build a notes app"          # ...and then run what it wrote
+llmorch chat                                     # a session, not one shot
 llmorch resume <run_id>                          # after a quota wall
 ```
+
+`chat` keeps the conversation: the first instruction builds a project, and each
+one after it is planned as a *change* to what already exists, so "now add tags"
+rewrites the two files that need it rather than the six that do not. What a later
+turn remembers is the instructions, the interface contract, and one summary per
+file — never the file contents, because a conversation that pasted its artifacts
+back into the planner would grow every prompt with the project instead of with
+the request. Sessions are saved after every turn; `--continue` picks the last one
+back up.
 
 `--smoke` starts the generated project, drives the contract's pages and routes
 against it over HTTP, and reports what came back. How to start it is part of the

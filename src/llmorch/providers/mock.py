@@ -67,6 +67,29 @@ CANNED_PLAN = json.dumps(
     }
 )
 
+# The answer to a `[revise]` request: a change to a project that already exists,
+# not a fresh plan. One node, reusing an existing `output_path`, which is what a
+# rewrite looks like — enough for the offline path to exercise the whole turn.
+CANNED_REVISION = json.dumps(
+    {
+        "interface": {
+            "routes": [{"method": "GET", "path": "/api/items/{id}", "returns": "Item"}]
+        },
+        "nodes": [
+            {
+                "id": "page",
+                "title": "Index page, revised",
+                "role": "frontend",
+                "spec": "Add a detail link to each item.",
+                "output_path": "index.html",
+                "output_kind": "code",
+                "needs": ["server.summary"],
+                "est_output_tokens": 400,
+            }
+        ],
+    }
+)
+
 CANNED_BIDS = json.dumps(
     {
         "bids": [
@@ -126,6 +149,8 @@ class MockProvider:
     """Reviews are answered separately from artifacts: handing a reviewer the
     canned file back would make every Tier 1 test a study of JSON parsing."""
     plan_response: str = CANNED_PLAN
+    revise_response: str = CANNED_REVISION
+    """Answer to a `[revise]` request — a change to what already exists."""
     """Answer to a `[decompose]` request. The negotiation round is the part of
     the system a single live mistake is most expensive in — one request the
     whole run hangs on — so it has to be exercisable with no network."""
@@ -186,6 +211,8 @@ class MockProvider:
 
         if negotiating == "decompose":
             return self._respond(request, self.plan_response)
+        if negotiating == "revise":
+            return self._respond(request, self.revise_response)
         if negotiating == "bid":
             return self._respond(request, self.bid_response)
         if reviewing:
@@ -265,6 +292,8 @@ def _negotiation_marker(request: ChatRequest) -> str | None:
             stripped = line.strip()
             if stripped == "[decompose]":
                 return "decompose"
+            if stripped == "[revise]":
+                return "revise"
             if stripped == "[bid]":
                 return "bid"
     return None
