@@ -23,6 +23,7 @@ from llmorch.demo.website import ARTIFACTS, INTERFACE, build_nodes
 from llmorch.engine import smoke
 from llmorch.engine.checkpoint import plan_from_dict, plan_to_dict
 from llmorch.engine.smoke import (
+    INSTALL_RECIPES,
     Probe,
     SmokeReport,
     candidate_ports,
@@ -30,6 +31,7 @@ from llmorch.engine.smoke import (
     find_entrypoint,
     port_is_free,
     sample_body,
+    install_plan,
     plan_launch,
     smoke_run,
     usable_ports,
@@ -673,6 +675,153 @@ def test_a_declared_port_the_server_never_binds_says_which_disagreed(tmp_path):
 
     assert not report.ran
     assert any("the declaration and" in i.why for i in report.errors)
+
+
+# ==========================================================================
+# Dependencies
+# ==========================================================================
+
+
+def test_every_recipe_is_pinned_and_runs_no_package_scripts():
+    """Both properties are the reason an install is allowed here at all.
+
+    A package's install hooks are third-party code the plan never mentioned, and
+    an unpinned install resolves to whatever the registry serves today.
+    """
+    for recipe in INSTALL_RECIPES:
+        assert "--ignore-scripts" in recipe.argv
+        assert any(
+            flag in recipe.argv for flag in ("ci", "--frozen-lockfile")
+        ), recipe.argv
+
+
+def test_a_lockfile_without_its_install_is_a_plan(tmp_path):
+    (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")
+    recipe = install_plan(tmp_path)
+    assert recipe is not None
+    assert recipe.argv[0] == "npm"
+
+
+def test_an_install_already_done_is_not_planned_again(tmp_path):
+    (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "node_modules").mkdir()
+    assert install_plan(tmp_path) is None
+
+
+def test_a_folder_with_no_lockfile_needs_nothing(tmp_path):
+    (tmp_path / "server.py").write_text("# ok\n", encoding="utf-8")
+    assert install_plan(tmp_path) is None
+
+
+def test_python_and_go_are_left_alone(tmp_path):
+    """`go run` fetches its own modules, and installing model-chosen packages
+    into the interpreter running llmorch would change the user's environment."""
+    (tmp_path / "requirements.txt").write_text("flask\n", encoding="utf-8")
+    (tmp_path / "go.sum").write_text("", encoding="utf-8")
+    assert install_plan(tmp_path) is None
+
+
+def test_needing_an_install_that_was_not_asked_for_is_a_skip(tmp_path):
+    """Named precisely, with the command that would fix it — the project is not
+    started into a folder where it can only fail."""
+    port = free_port()
+    write_fixture_server(tmp_path, port=port)
+    (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")
+
+    report = smoke_run(tmp_path, declaring(("python", "server.py"), port=port))
+
+    assert not report.ran
+    assert "npm ci --ignore-scripts" in report.skipped
+    assert not report.errors
+
+
+def test_a_failed_install_is_not_the_project_s_fault(tmp_path, monkeypatch):
+    port = free_port()
+    write_fixture_server(tmp_path, port=port)
+    (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        smoke, "_run_install", lambda recipe, cwd: (False, "npm ERR! 404 not found")
+    )
+
+    report = smoke_run(
+        tmp_path, declaring(("python", "server.py"), port=port), install=True
+    )
+
+    assert not report.ran
+    assert [i.what for i in report.errors] == ["`npm ci --ignore-scripts` failed"]
+    assert "nothing here is its fault" in report.errors[0].why
+    assert "404" in report.stderr_tail
+
+
+def test_a_successful_install_is_recorded_and_the_project_then_runs(
+    tmp_path, monkeypatch
+):
+    port = free_port()
+    write_fixture_server(tmp_path, port=port, table={"/": [200, "up"]})
+    (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")
+    ran: list = []
+
+    def fake_install(recipe, cwd):
+        ran.append((recipe.argv, cwd))
+        (cwd / recipe.marker).mkdir()
+        return True, ""
+
+    monkeypatch.setattr(smoke, "_run_install", fake_install)
+
+    report = smoke_run(
+        tmp_path, declaring(("python", "server.py"), port=port), install=True
+    )
+
+    assert ran and ran[0][1] == tmp_path.resolve()
+    assert report.ran, report.skipped
+    assert report.installed == "npm ci --ignore-scripts"
+    assert not report.errors
+
+
+def test_a_death_from_a_missing_dependency_is_not_blamed_on_the_code(tmp_path):
+    """The bug this exists to fix: without it the report reads as the model
+    writing a bad import, when the harness started it in an empty folder."""
+    (tmp_path / "server.py").write_text(
+        "import a_package_nobody_installed\n", encoding="utf-8"
+    )
+
+    report = smoke_run(
+        tmp_path,
+        declaring(("python", "server.py"), port=free_port()),
+        boot_timeout=10.0,
+    )
+
+    assert not report.ran
+    assert any("want of a dependency" in i.what for i in report.warnings)
+    assert any("no lockfile was found" in i.why for i in report.warnings)
+
+
+def test_an_ordinary_crash_is_still_the_code_s_fault(tmp_path):
+    """The hint must not fire on every failure, or it stops meaning anything."""
+    (tmp_path / "server.py").write_text("raise ValueError('bad')\n", encoding="utf-8")
+
+    report = smoke_run(
+        tmp_path,
+        declaring(("python", "server.py"), port=free_port()),
+        boot_timeout=10.0,
+    )
+
+    assert not report.ran
+    assert not report.warnings
+
+
+def test_stderr_keeps_the_cause_as_well_as_the_stack():
+    """Node names the missing module on line one and stacks thirty frames after
+    it, so a tail alone shows the stack and loses the cause."""
+    text = "Error: Cannot find module 'express'\n" + "\n".join(
+        f"    at frame {i}" for i in range(40)
+    )
+    rendered = render_smoke(
+        SmokeReport(entrypoint="server.js", stderr_tail=text, skipped="")
+    )
+    assert "Cannot find module" in rendered
+    assert "more lines" in rendered
+    assert "at frame 39" in rendered
 
 
 # ==========================================================================

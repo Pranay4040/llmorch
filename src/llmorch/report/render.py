@@ -269,6 +269,23 @@ def render_contracts(report: "ContractReport") -> str:
     return "\n".join(lines)
 
 
+def _stderr_block(text: str, limit: int = 12) -> list[str]:
+    """The captured stderr, keeping both ends when it is too long for one.
+
+    A tail alone is the wrong half for the most common case: Node puts
+    `Cannot find module` on the first line and thirty frames of stack after it,
+    so twelve lines from the bottom show the stack and lose the cause.
+    """
+    lines = [line for line in text.splitlines() if line.strip()]
+    if len(lines) <= limit:
+        body = lines
+    else:
+        head = (limit + 1) // 2
+        elision = f"... {len(lines) - limit} more lines ..."
+        body = lines[:head] + [elision] + lines[head - limit :]
+    return [f"    {line}" for line in body]
+
+
 def render_smoke(report: "SmokeReport") -> str:
     """What happened when the generated project was actually run.
 
@@ -295,9 +312,11 @@ def render_smoke(report: "SmokeReport") -> str:
         if report.stderr_tail:
             lines.append("  " + "-" * 74)
             lines.append("  stderr:")
-            lines += [f"    {line}" for line in report.stderr_tail.splitlines()[-12:]]
+            lines += _stderr_block(report.stderr_tail)
         return "\n".join(lines)
 
+    if report.installed:
+        lines.append(f"  {report.installed}")
     lines.append(f"  {report.entrypoint} on http://127.0.0.1:{report.port}")
     for probe in report.probes:
         status = str(probe.status) if probe.status is not None else "---"
@@ -322,7 +341,7 @@ def render_smoke(report: "SmokeReport") -> str:
     if report.stderr_tail:
         lines.append("  " + "-" * 74)
         lines.append("  stderr:")
-        lines += [f"    {line}" for line in report.stderr_tail.splitlines()[-12:]]
+        lines += _stderr_block(report.stderr_tail)
 
     lines.append("  " + "-" * 74)
     lines.append(

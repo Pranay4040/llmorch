@@ -82,6 +82,20 @@ _PATHISH = re.compile(r"[/\\]|\.[A-Za-z0-9]{1,6}$")
 
 MAX_LAUNCH_ARGS = 12
 
+# Signatures of a process that died because a dependency was not there. The
+# point of recognising them is attribution: without it, a project that dies on
+# its first `require` reads as the model writing bad code, when what actually
+# happened is that this harness started it without installing anything.
+_MISSING_DEPENDENCY = (
+    "cannot find module",
+    "modulenotfounderror",
+    "no module named",
+    "err_module_not_found",
+    "no required module provides package",
+)
+
+INSTALL_TIMEOUT = 300.0
+
 DEFAULT_PORT = 8000
 
 # Written by `materialize._stub_for` when no model could produce the node. There
@@ -132,6 +146,8 @@ class SmokeReport:
     """Why nothing was launched. Empty when `ran` is True."""
     entrypoint: str = ""
     port: int | None = None
+    installed: str = ""
+    """The install command that ran first, when one did."""
     probes: list[Probe] = field(default_factory=list)
     issues: list[SmokeIssue] = field(default_factory=list)
     stderr_tail: str = ""
@@ -210,6 +226,85 @@ def usable_ports(ports: tuple[int, ...]) -> tuple[int, ...]:
 
 def _looks_degraded(source: str) -> bool:
     return _DEGRADED in source[:400]
+
+
+@dataclass(frozen=True, slots=True)
+class Install:
+    """A lockfile-pinned dependency install for the folder that was written."""
+
+    argv: tuple[str, ...]
+    lockfile: str
+    marker: str
+    """The directory whose presence means the install already happened."""
+
+    @property
+    def label(self) -> str:
+        return " ".join(self.argv)
+
+
+# Keyed on the lockfile, not on anything a model said. That is the whole design:
+# `LaunchSpec.command` is declared and therefore validated, while this is
+# inferred from a file the build either produced or did not, so there is no new
+# untrusted input to check.
+#
+# Every recipe is pinned to the lockfile and passes `--ignore-scripts`, because
+# a package's install hooks are third-party code the plan never mentioned and
+# nobody reviewed. Each was run against a real install before being written
+# down; the flags differ per manager and guessing them produces a recipe that
+# fails in a way that looks like the project's fault.
+INSTALL_RECIPES: tuple[Install, ...] = (
+    Install(("npm", "ci", "--ignore-scripts"), "package-lock.json", "node_modules"),
+    Install(
+        ("pnpm", "install", "--frozen-lockfile", "--ignore-scripts"),
+        "pnpm-lock.yaml",
+        "node_modules",
+    ),
+    Install(
+        ("yarn", "install", "--frozen-lockfile", "--ignore-scripts"),
+        "yarn.lock",
+        "node_modules",
+    ),
+)
+
+
+def install_plan(output_dir: Path) -> Install | None:
+    """The install this folder needs and has not had, or None.
+
+    Nothing is inferred for Python or Go on purpose. `go run` fetches its own
+    modules, so a Go build needs network rather than a step; and installing
+    model-chosen packages into the interpreter running llmorch would put them in
+    the user's environment, which is not this module's to change. Both are
+    instead recognised on failure, by `_MISSING_DEPENDENCY`.
+    """
+    for recipe in INSTALL_RECIPES:
+        if (output_dir / recipe.lockfile).is_file():
+            if (output_dir / recipe.marker).is_dir():
+                return None
+            return recipe
+    return None
+
+
+def _run_install(recipe: Install, cwd: Path) -> tuple[bool, str]:
+    """Run it and return (ok, output tail). Never raises."""
+    try:
+        finished = subprocess.run(
+            list(recipe.argv),
+            cwd=str(cwd),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=INSTALL_TIMEOUT,
+        )
+    except FileNotFoundError:
+        return False, f"{recipe.argv[0]} is not installed on this machine"
+    except subprocess.TimeoutExpired:
+        return False, f"timed out after {INSTALL_TIMEOUT:.0f}s"
+    except OSError as exc:
+        return False, str(exc)
+
+    if finished.returncode == 0:
+        return True, ""
+    tail = (finished.stderr or finished.stdout or b"").decode("utf-8", "replace")
+    return False, tail.strip()[-2000:]
 
 
 @dataclass(frozen=True, slots=True)
@@ -544,6 +639,27 @@ def _wait_for_boot(
 # --------------------------------------------------------------------------
 
 
+def _blame_missing_dependency(report: SmokeReport, *, installed: bool) -> None:
+    """Say so when a project died for want of something nobody installed.
+
+    Without this the report blames the code: a `Cannot find module` traceback
+    under a heading about the project failing to start reads as the model having
+    written a bad import, when the harness started it in an empty folder.
+    """
+    haystack = report.stderr_tail.lower()
+    if not any(sign in haystack for sign in _MISSING_DEPENDENCY):
+        return
+    report.add(
+        "warning",
+        "it died for want of a dependency, which this run did not install",
+        why=(
+            "the install that ran did not cover it"
+            if installed
+            else "no lockfile was found here that `--smoke-install` knows how to use"
+        ),
+    )
+
+
 def _probe_ready(
     base: str, launch: Launch, report: SmokeReport, timeout: float
 ) -> None:
@@ -722,6 +838,7 @@ def smoke_run(
     interface: InterfaceContract,
     *,
     python: str | None = None,
+    install: bool = False,
     boot_timeout: float = 15.0,
     request_timeout: float = 5.0,
 ) -> SmokeReport:
@@ -739,6 +856,30 @@ def smoke_run(
         report.skipped = refusal
         return report
     report.entrypoint = launch.label
+
+    # Dependencies, before anything is started. A project launched without them
+    # dies on its first import, and the resulting traceback is about the wrong
+    # thing entirely.
+    recipe = install_plan(launch.cwd)
+    if recipe is not None:
+        if not install:
+            report.skipped = (
+                f"{launch.label} needs dependencies: {recipe.lockfile} is present "
+                f"and {recipe.marker}/ is not. Re-run with --smoke-install to run "
+                f"`{recipe.label}` first (it reaches the network)."
+            )
+            return report
+        ok, detail = _run_install(recipe, launch.cwd)
+        report.installed = recipe.label
+        if not ok:
+            report.stderr_tail = detail
+            report.add(
+                "error",
+                f"`{recipe.label}` failed",
+                where=recipe.lockfile,
+                why="the project was never started, so nothing here is its fault",
+            )
+            return report
 
     ports = launch.ports
     free = usable_ports(ports)
@@ -770,6 +911,7 @@ def smoke_run(
                     where=launch.label,
                     why="the project does not start at all",
                 )
+                _blame_missing_dependency(report, installed=install)
             else:
                 report.add(
                     "error",

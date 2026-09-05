@@ -495,8 +495,13 @@ def _execute(session: Session, args, *, resume: Checkpoint | None = None) -> int
     # other step treats model output as untrusted data, and this one hands it
     # the interpreter.
     smoke = None
-    if getattr(args, "smoke", False):
-        smoke = smoke_run(config.output_dir, session.scheduler.blackboard.interface)
+    wants_install = getattr(args, "smoke_install", False)
+    if getattr(args, "smoke", False) or wants_install:
+        smoke = smoke_run(
+            config.output_dir,
+            session.scheduler.blackboard.interface,
+            install=wants_install,
+        )
         print(render_smoke(smoke))
 
     print(render_warnings(outcome.warnings))
@@ -561,6 +566,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="start the generated project and drive its routes and pages "
         "(runs model-written code; off by default)",
     )
+    run.add_argument(
+        "--smoke-install",
+        action="store_true",
+        help="--smoke, plus a lockfile-pinned dependency install first "
+        "(reaches the network; package install scripts stay disabled)",
+    )
     run.add_argument("--allow-paid", action="store_true")
     run.add_argument("--max-usd", type=float, default=0.0)
     run.add_argument("--max-nodes", type=int, default=10)
@@ -583,6 +594,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--smoke",
         action="store_true",
         help="start the completed project and drive it (runs model-written code)",
+    )
+    resume.add_argument(
+        "--smoke-install",
+        action="store_true",
+        help="--smoke, plus a lockfile-pinned dependency install first",
     )
     resume.add_argument("--max-nodes", type=int, default=10)
     resume.add_argument("--concurrency", type=int, default=4)

@@ -130,7 +130,14 @@ contract the planner emits, so it is stated rather than guessed:
 The command is checked before it runs: the program must be a known interpreter,
 and every path in it must resolve inside the output folder, through the same
 containment check that writing those files used. A command that fails either
-test is refused by name — never quietly replaced with a guess. It is off by default and has
+test is refused by name — never quietly replaced with a guess.
+
+A project with dependencies gets `--smoke-install`, which runs a lockfile-pinned
+install first — `npm ci --ignore-scripts` and its pnpm and yarn equivalents. The
+recipe is chosen by which lockfile the build produced, not by anything a model
+said, and package install scripts stay disabled. Without that flag, a project
+needing an install is skipped with the command that would fix it, rather than
+being started into a folder where it can only fail. It is off by default and has
 to be asked for: every other step in the system treats model output as untrusted
 data, and this one hands it the interpreter. What it buys is the only evidence in
 a run that did not come from reading the code — a project whose files all parse,

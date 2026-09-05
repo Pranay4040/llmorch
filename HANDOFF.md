@@ -1,6 +1,6 @@
 # llmorch — handoff
 
-**State:** M0–M6 done, plus the smoke run. 503 tests pass, 1 skipped on Windows
+**State:** M0–M6 done, plus the smoke run. 514 tests pass, 1 skipped on Windows
 (a symlink test needing admin). Published at github.com/Pranay4040/llmorch,
 tagged `v0.1.0`.
 
@@ -18,9 +18,10 @@ Two things in one repo:
 ## Run it
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q                  # 503 tests, no network
+.venv/Scripts/python.exe -m pytest -q                  # 514 tests, no network
 .venv/Scripts/python.exe -m llmorch run "build a notes app"        # mock, offline
 .venv/Scripts/python.exe -m llmorch run --smoke "<task>"          # ...then run the result
+.venv/Scripts/python.exe -m llmorch run --smoke-install "<task>"  # ...installing its deps first
 .venv/Scripts/python.exe -m llmorch run --live --providers all "<task>"
 .venv/Scripts/python.exe -m llmorch resume <run_id>    # after a quota wall
 .venv/Scripts/python.exe -m llmorch doctor --probe     # verify wire names live
@@ -56,15 +57,13 @@ Ordered by value. Issues #1–#4 are filed on GitHub.
    and asset checks are HTTP-shaped and the call check is `ast`-based, so a JS or
    Go build gets nothing. Keep any new check conservative: a false accusation
    about working code is worse than a missed fault.
-2. **A dependency step before launch.** `InterfaceContract.launch` now lets a
-   plan state how to start itself, so a Node or Go build runs rather than being
-   skipped — verified against a hand-written Node project. What is still missing
-   is anything that needs installing or compiling first: a `package.json` with
-   dependencies starts and dies on the first `require`, and the failure reads as
-   the model's fault when it is the harness's. Whatever is added must stay
-   inside the same rule the launch command follows — the project just written,
-   never an arbitrary command — which makes `npm ci` (lockfile, no scripts)
-   the shape to aim at and `npm install` the shape to avoid.
+2. **A compiled build step, if it is ever worth it.** `--smoke-install` covers
+   the Node case: a lockfile is enough to install from, and the recipe is
+   inferred from which lockfile exists rather than declared by a model. What is
+   still not covered is anything needing a *compile* — a Go binary, a TypeScript
+   build — and the case for adding it is weaker than it looks: `go run` already
+   fetches and compiles, and a build step is where an arbitrary command would
+   have to come back in. Worth doing only when a real plan is blocked by it.
 3. **Paid providers** (#2). DeepSeek, Moonshot, Fireworks, OpenCode Zen are
    discovered and undeclared. OpenCode Zen fronts Claude and GPT families, so it
    would reopen the roster the way OpenRouter did. Blocked on *verified*
@@ -97,6 +96,15 @@ Each was learned by getting it wrong against a live API.
   it a reviewer passed a file that resolved every page to the drive root.
 - **A reviewer never shares the author's vendor**, review is advisory and never
   fatal, and repairs are capped at one per node.
+- **The install recipe is inferred, never declared.** `LaunchSpec.command` is
+  model input and is therefore validated; the install is keyed on which lockfile
+  the build produced, so there is no second untrusted command to check. Every
+  recipe is pinned to that lockfile and passes `--ignore-scripts`: a package's
+  install hooks are third-party code the plan never mentioned.
+- **An install failure is never the project's fault.** It happens before
+  anything is started, so the report says so — and a process that dies naming a
+  module nobody installed gets the same attribution rather than reading as the
+  model writing a bad import.
 - **A refused launch is never a fallback.** A contract that states how to start
   itself and states something the allowlist will not run gets a skip naming the
   reason. Quietly guessing `server.py` instead would start a different program
@@ -122,6 +130,14 @@ Each was learned by getting it wrong against a live API.
 
 ## Gotchas
 
+- `--smoke-install` is the **only step in the system that reaches the network
+  without an API key**, and the only one that runs third-party code. It is off
+  by default and CI never passes it, which is what keeps `pytest` and the CI
+  demo run offline.
+- The three install recipes were each **run against a real install** before
+  being written down. The flags differ per manager — yarn v1 takes
+  `--frozen-lockfile`, yarn berry does not — and a guessed flag fails in a way
+  that looks like the project's fault.
 - A **declared port that disagrees with the code** is a boot timeout, not a
   quick failure: the run waits on the port the contract named. The error says
   which declaration is suspect, but the fifteen seconds are spent either way.
