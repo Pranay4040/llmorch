@@ -15,11 +15,13 @@ from __future__ import annotations
 
 import json
 import socket
+from dataclasses import replace
 
 import pytest
 
 from llmorch.demo.website import ARTIFACTS, INTERFACE, build_nodes
 from llmorch.engine import smoke
+from llmorch.engine.checkpoint import plan_from_dict, plan_to_dict
 from llmorch.engine.smoke import (
     Probe,
     SmokeReport,
@@ -28,11 +30,12 @@ from llmorch.engine.smoke import (
     find_entrypoint,
     port_is_free,
     sample_body,
+    plan_launch,
     smoke_run,
     usable_ports,
 )
 from llmorch.report.render import render_smoke
-from llmorch.types import InterfaceContract
+from llmorch.types import InterfaceContract, LaunchSpec
 
 PATHS = {n.id: n.output_path for n in build_nodes()}
 
@@ -223,6 +226,11 @@ def test_a_port_this_run_did_not_open_is_never_probed(tmp_path, monkeypatch):
 # ==========================================================================
 
 
+def demo_interface(port: int) -> InterfaceContract:
+    """The demo contract, declaring the port this test's copy actually binds."""
+    return replace(INTERFACE, launch=replace(INTERFACE.launch, port=port))
+
+
 def test_the_demo_project_actually_runs(tmp_path):
     """The reference artifacts, executed rather than inspected.
 
@@ -233,7 +241,7 @@ def test_the_demo_project_actually_runs(tmp_path):
     port = free_port()
     write_demo_project(tmp_path, port)
 
-    report = smoke_run(tmp_path, INTERFACE)
+    report = smoke_run(tmp_path, demo_interface(port))
 
     assert report.ran, report.skipped
     assert report.port == port
@@ -252,6 +260,23 @@ def test_the_demo_project_actually_runs(tmp_path):
     # id came back from the server rather than being guessed.
     detail = [p for p in report.probes if p.path.startswith("/api/notes/")]
     assert detail and detail[0].status == 200
+
+
+def test_the_demo_project_runs_without_a_declared_launch_too(tmp_path):
+    """The inference path, kept working for a plan that predates `launch`.
+
+    Checkpoints and cached plans written before the contract carried a launch
+    command still resume, so this is not a legacy branch — it is the one every
+    stored plan takes.
+    """
+    port = free_port()
+    write_demo_project(tmp_path, port)
+
+    report = smoke_run(tmp_path, replace(INTERFACE, launch=LaunchSpec()))
+
+    assert report.ran, report.skipped
+    assert report.port == port  # read out of the source, as before
+    assert not report.errors, [i.what for i in report.errors]
 
 
 # ==========================================================================
@@ -425,6 +450,261 @@ def test_a_destructive_method_is_never_driven(tmp_path):
 
     assert report.ran, report.skipped
     assert not report.probes
+
+
+# ==========================================================================
+# The declared launch command
+# ==========================================================================
+
+
+def declaring(command, **kwargs) -> InterfaceContract:
+    return InterfaceContract(launch=LaunchSpec(command=command, **kwargs))
+
+
+def test_a_declared_command_is_used_instead_of_the_search(tmp_path):
+    """The point of the whole field: the contract says how to start itself."""
+    port = free_port()
+    write_fixture_server(tmp_path, port=port, table={"/": [200, "up"]})
+    (tmp_path / "boot.py").write_text(
+        (tmp_path / "server.py").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (tmp_path / "server.py").write_text(
+        "raise SystemExit('wrong file')\n", encoding="utf-8"
+    )
+
+    launch, refusal = plan_launch(
+        tmp_path, declaring(("python", "boot.py"), port=port), python="/usr/bin/python3"
+    )
+
+    assert refusal == ""
+    assert launch.argv == ("/usr/bin/python3", "boot.py")
+    assert launch.ports == (port,)
+    assert launch.label == "boot.py"
+
+
+def test_a_declared_port_is_taken_over_the_source_literal(tmp_path):
+    write_fixture_server(tmp_path, port=9999)
+    launch, _ = plan_launch(tmp_path, declaring(("python", "server.py"), port=4321))
+    assert launch.ports == (4321,)
+    assert launch.port_declared
+
+
+def test_a_declared_launch_without_a_port_still_reads_the_source(tmp_path):
+    write_fixture_server(tmp_path, port=9999)
+    launch, _ = plan_launch(tmp_path, declaring(("python", "server.py")))
+    assert launch.ports[0] == 9999
+    assert not launch.port_declared
+
+
+def test_a_subcommand_and_a_flag_pass_through(tmp_path):
+    """`go run main.go`, `node --enable-source-maps server.js`."""
+    (tmp_path / "main.go").write_text("package main\n", encoding="utf-8")
+    launch, refusal = plan_launch(tmp_path, declaring(("go", "run", "main.go")))
+    assert refusal == ""
+    assert launch.argv == ("go", "run", "main.go")
+
+    (tmp_path / "server.js").write_text("// js\n", encoding="utf-8")
+    launch, refusal = plan_launch(
+        tmp_path, declaring(("node", "--enable-source-maps", "server.js"))
+    )
+    assert refusal == ""
+    assert launch.argv == ("node", "--enable-source-maps", "server.js")
+
+
+def test_a_file_in_a_subdirectory_is_addressed_from_the_output_root(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("# app\n", encoding="utf-8")
+    launch, refusal = plan_launch(
+        tmp_path, declaring(("python", "src/app.py")), python="py"
+    )
+    assert refusal == ""
+    assert launch.argv == ("py", "src/app.py")
+    assert launch.cwd == tmp_path.resolve()
+
+
+def test_a_program_outside_the_allowlist_is_refused(tmp_path):
+    """Not because `bash` could run code the artifacts could not — it is the
+    blast radius that narrows, from any binary to the project just written."""
+    (tmp_path / "server.py").write_text("# ok\n", encoding="utf-8")
+    launch, refusal = plan_launch(tmp_path, declaring(("bash", "-c", "server.py")))
+    assert launch is None
+    assert "not one of" in refusal
+
+
+def test_a_path_escaping_the_output_folder_is_refused(tmp_path):
+    launch, refusal = plan_launch(
+        tmp_path, declaring(("python", "../../etc/passwd"))
+    )
+    assert launch is None
+    assert "traverse upwards" in refusal
+
+
+def test_an_absolute_path_is_refused(tmp_path):
+    launch, refusal = plan_launch(tmp_path, declaring(("python", "/etc/hosts")))
+    assert launch is None
+    assert "relative" in refusal
+
+
+def test_a_file_no_node_produced_is_refused(tmp_path):
+    launch, refusal = plan_launch(tmp_path, declaring(("python", "server.py")))
+    assert launch is None
+    assert "which no node produced" in refusal
+
+
+def test_a_module_flag_cannot_stand_in_for_the_project(tmp_path):
+    """`python -m http.server` would serve the folder and prove nothing about
+    the code the models wrote. It is refused as a module nothing produced."""
+    launch, refusal = plan_launch(tmp_path, declaring(("python", "-m", "http.server")))
+    assert launch is None
+    assert "http.server" in refusal
+
+
+def test_a_command_with_no_file_argument_at_all_is_refused(tmp_path):
+    launch, refusal = plan_launch(tmp_path, declaring(("python", "-u")))
+    assert launch is None
+    assert "names no file" in refusal
+
+
+def test_a_shell_shaped_argument_is_refused(tmp_path):
+    """Nothing here reaches a shell — `shell=True` is never set — so this is
+    about not passing through a token whose shape we cannot account for."""
+    (tmp_path / "server.py").write_text("# ok\n", encoding="utf-8")
+
+    # Caught as a path, by the same containment check materialization uses.
+    _, refusal = plan_launch(
+        tmp_path, declaring(("python", "server.py", "; rm -rf /"))
+    )
+    assert refusal
+
+    # Caught as neither a path nor an argument shape we recognise.
+    _, refusal = plan_launch(
+        tmp_path, declaring(("python", "server.py", "$(whoami)"))
+    )
+    assert "will not pass" in refusal
+
+
+def test_a_command_with_too_many_arguments_is_refused(tmp_path):
+    launch, refusal = plan_launch(
+        tmp_path, declaring(("python",) + tuple(f"a{i}" for i in range(20)))
+    )
+    assert launch is None
+    assert "over the" in refusal
+
+
+def test_a_declared_launch_naming_a_degraded_stub_is_refused(tmp_path):
+    (tmp_path / "server.py").write_text(
+        "# DEGRADED — not generated\n", encoding="utf-8"
+    )
+    launch, refusal = plan_launch(tmp_path, declaring(("python", "server.py")))
+    assert launch is None
+    assert "degraded stub" in refusal
+
+
+def test_a_refused_launch_never_falls_back_to_guessing(tmp_path):
+    """A contract that states how to start itself and states something we will
+    not run gets a skip, not a different program started in its place."""
+    write_fixture_server(tmp_path, port=free_port())
+    report = smoke_run(tmp_path, declaring(("bash", "server.py")))
+
+    assert not report.ran
+    assert "not one of" in report.skipped
+    assert not report.probes
+
+
+def test_the_ready_path_is_probed_before_anything_else(tmp_path):
+    port = free_port()
+    write_fixture_server(tmp_path, port=port, table={"/health": [200, "ok"]})
+
+    report = smoke_run(
+        tmp_path, declaring(("python", "server.py"), port=port, ready_path="/health")
+    )
+
+    assert report.ran, report.skipped
+    assert report.probes[0].label == "GET /health"
+    assert not report.errors
+
+
+def test_a_ready_path_that_is_also_a_page_is_probed_once(tmp_path):
+    """The page check is the stricter of the two, so it is the one that runs."""
+    port = free_port()
+    write_fixture_server(tmp_path, port=port, table={"/index.html": [200, "<html>"]})
+
+    report = smoke_run(
+        tmp_path,
+        replace(
+            declaring(("python", "server.py"), port=port, ready_path="/index.html"),
+            pages=("index.html",),
+        ),
+    )
+
+    assert report.ran, report.skipped
+    assert [p.label for p in report.probes] == ["GET /index.html"]
+
+
+def test_a_ready_path_that_five_hundreds_is_an_error(tmp_path):
+    port = free_port()
+    write_fixture_server(tmp_path, port=port, table={"/": [503, "starting"]})
+
+    report = smoke_run(tmp_path, declaring(("python", "server.py"), port=port))
+
+    assert report.ran, report.skipped
+    assert any("`/` returned 503" in i.what for i in report.errors)
+
+
+def test_a_ready_path_that_404s_is_fine(tmp_path):
+    """An API with no root route is a normal shape, not a broken server."""
+    port = free_port()
+    write_fixture_server(tmp_path, port=port, table={})
+
+    report = smoke_run(tmp_path, declaring(("python", "server.py"), port=port))
+
+    assert report.ran, report.skipped
+    assert not report.errors
+
+
+def test_a_declared_port_the_server_never_binds_says_which_disagreed(tmp_path):
+    write_fixture_server(tmp_path, port=free_port())
+
+    report = smoke_run(
+        tmp_path,
+        declaring(("python", "server.py"), port=free_port()),
+        boot_timeout=2.0,
+    )
+
+    assert not report.ran
+    assert any("the declaration and" in i.why for i in report.errors)
+
+
+# ==========================================================================
+# Reading a launch out of untrusted JSON
+# ==========================================================================
+
+
+def test_a_command_line_string_is_accepted_where_a_list_was_asked_for():
+    assert LaunchSpec.from_payload({"command": "python server.py"}).command == (
+        "python",
+        "server.py",
+    )
+
+
+def test_a_port_that_arrives_as_a_string_is_read():
+    spec = LaunchSpec.from_payload({"command": ["node", "a.js"], "port": "3000"})
+    assert spec.port == 3000
+
+
+def test_junk_yields_a_contract_that_declares_nothing():
+    for junk in ("rm -rf /", None, 42, {"command": {"not": "a list"}}, {"command": []}):
+        assert not LaunchSpec.from_payload(junk).declared
+
+
+def test_a_launch_survives_the_checkpoint_round_trip(tmp_path):
+    """Resuming a run must start the project the same way the plan said to."""
+    interface = declaring(("node", "server.js"), port=3000, ready_path="/health")
+    nodes = {n.id: n for n in build_nodes()}
+
+    restored = plan_from_dict(plan_to_dict(nodes, interface))[1]
+
+    assert restored.launch == interface.launch
 
 
 # ==========================================================================

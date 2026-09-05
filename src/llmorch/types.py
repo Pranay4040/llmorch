@@ -285,6 +285,86 @@ class NodeResult:
 
 
 @dataclass(frozen=True, slots=True)
+class LaunchSpec:
+    """How to start what the build produces, stated rather than guessed.
+
+    `InterfaceContract.runtime` is prose, written for the models: it says which
+    OS and interpreter the code must be correct under. This is the machine-
+    readable half of the same fact, and it exists because the smoke run
+    previously had to infer it — hunting for `server.py` and reading a port
+    literal out of the source. That inference is right for the pinned stack and
+    wrong for everything else, so a Node or Go build could never be run at all.
+
+    Empty is the honest default: a plan that declares nothing gets the old
+    inference, and only a plan that states its launch gets to be started on its
+    own terms. Nothing here is trusted — `engine.smoke.plan_launch` re-validates
+    every field at the point of execution, because a contract can arrive from a
+    model, a checkpoint, or a plan-cache file somebody edited by hand.
+    """
+
+    command: tuple[str, ...] = ()
+    """argv, already split. `("python", "server.py")`, `("node", "server.js")`."""
+
+    port: int | None = None
+    """The port it listens on. None means read it out of the source, as before."""
+
+    ready_path: str = "/"
+    """A path that should answer once the server is up. A 404 here is fine — an
+    API with no root route is a normal shape — but a 5xx or silence is not."""
+
+    @property
+    def declared(self) -> bool:
+        return bool(self.command)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "command": list(self.command),
+            "port": self.port,
+            "ready_path": self.ready_path,
+        }
+
+    @classmethod
+    def from_payload(cls, raw: Any) -> LaunchSpec:
+        """Read one out of untrusted JSON — a model's plan, a checkpoint, a
+        hand-edited cache file.
+
+        Shape only. Whether the result may actually be executed is decided at
+        the point of execution by `engine.smoke.plan_launch`, because two of
+        those three sources never pass through here.
+        """
+        if not isinstance(raw, dict):
+            return cls()
+
+        command = raw.get("command")
+        if isinstance(command, str):
+            # A model that wrote a command line where a list was asked for.
+            # Splitting on whitespace is right for `python server.py` and wrong
+            # for a path containing a space — the second is then refused by
+            # name, which beats guessing at what was meant.
+            command = command.split()
+        if not isinstance(command, list):
+            return cls()
+        parts = tuple(
+            str(a).strip()
+            for a in command[:64]
+            if isinstance(a, (str, int, float)) and str(a).strip()
+        )
+
+        port = raw.get("port")
+        if isinstance(port, bool):
+            port = None
+        elif isinstance(port, str) and port.strip().isdigit():
+            port = int(port)
+        elif not isinstance(port, int):
+            port = None
+
+        ready = raw.get("ready_path")
+        ready = str(ready)[:200] if isinstance(ready, str) and ready.strip() else "/"
+
+        return cls(command=parts, port=port, ready_path=ready)
+
+
+@dataclass(frozen=True, slots=True)
 class InterfaceContract:
     """The shared spec every node receives verbatim.
 
@@ -304,6 +384,8 @@ class InterfaceContract:
     run produced path handling that is correct on POSIX and resolves every page
     to the drive root on Windows — and a reviewer told only the stack passed it,
     because on the platform it assumed, the code was right."""
+    launch: LaunchSpec = LaunchSpec()
+    """The same fact in a form a program can act on. See `LaunchSpec`."""
     notes: str = ""
 
 

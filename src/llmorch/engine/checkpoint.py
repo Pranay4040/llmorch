@@ -40,6 +40,7 @@ from ..config import runs_dir
 from ..errors import EngineError, UnsafePath
 from ..types import (
     InterfaceContract,
+    LaunchSpec,
     NodeResult,
     NodeState,
     OutputKind,
@@ -280,6 +281,7 @@ def plan_to_dict(
             "data_models": [dict(m) for m in interface.data_models],
             "pages": list(interface.pages),
             "runtime": interface.runtime,
+            "launch": interface.launch.to_dict(),
             "notes": interface.notes,
         },
         "nodes": [
@@ -308,6 +310,7 @@ def plan_from_dict(data: dict[str, Any]) -> tuple[list[TaskNode], InterfaceContr
         data_models=tuple(raw_interface.get("data_models") or ()),
         pages=tuple(raw_interface.get("pages") or ()),
         runtime=str(raw_interface.get("runtime") or ""),
+        launch=LaunchSpec.from_payload(raw_interface.get("launch")),
         notes=str(raw_interface.get("notes") or ""),
     )
     nodes = [

@@ -42,15 +42,45 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
-from ..types import InterfaceContract
+from ..errors import UnsafePath
+from ..types import InterfaceContract, LaunchSpec
 from .contracts import local_asset_refs
+from .materialize import safe_join
 
-# Tried in order. `server.py` first because it is what the pinned stack and the
-# generated README both name.
+# Tried in order, when the contract declares no launch of its own. `server.py`
+# first because it is what the pinned stack and the generated README both name.
 ENTRYPOINTS = ("server.py", "app.py", "main.py")
+
+# What a declared `command` is allowed to start.
+#
+# The allowlist is not what stops a hostile plan from running code — `--smoke`
+# already runs a model-written file, so that door is open by the time we get
+# here, and the user opened it. What it stops is the blast radius widening from
+# "the project we just materialized" to "any binary on this machine, with any
+# arguments". A contract that wants `bash -c` does not get it; it gets a skip
+# and a reason.
+INTERPRETERS = frozenset(
+    {"python", "python3", "node", "deno", "bun", "ruby", "php", "go"}
+)
+
+# Interpreters we substitute the running interpreter for, so a project is
+# started with the environment the tests and the CLI are already using rather
+# than whatever `python` means on this PATH.
+_PYTHON = frozenset({"python", "python3"})
+
+# An argument that is neither a path nor a flag: a subcommand like `go run`, or
+# a value like `--port=8080`. Bounded and character-restricted so nothing that
+# reaches a shell-like context can hide in one — though nothing here ever
+# reaches a shell, since `shell=True` is never used.
+_PLAIN_ARG = re.compile(r"^[A-Za-z0-9._:=@-]{1,64}$")
+
+# What makes an argument look like it names a file rather than a switch.
+_PATHISH = re.compile(r"[/\\]|\.[A-Za-z0-9]{1,6}$")
+
+MAX_LAUNCH_ARGS = 12
 
 DEFAULT_PORT = 8000
 
@@ -182,6 +212,157 @@ def _looks_degraded(source: str) -> bool:
     return _DEGRADED in source[:400]
 
 
+@dataclass(frozen=True, slots=True)
+class Launch:
+    """A start command that has been checked, with what to probe once it runs."""
+
+    argv: tuple[str, ...]
+    cwd: Path
+    label: str
+    ports: tuple[int, ...]
+    ready_path: str = ""
+    """Probed once the port opens, for a declared launch only. When the contract
+    declares nothing, its pages are the readiness evidence and this stays empty."""
+    declared: bool = False
+    port_declared: bool = False
+    """True when the port came from the contract rather than from the source.
+    Changes what a boot timeout means: a stated port that never opens is most
+    likely the statement being wrong, not the server being slow."""
+
+
+def _source_of(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _declared_launch(
+    output_dir: Path, spec: LaunchSpec, *, python: str
+) -> tuple[Launch | None, str]:
+    """Check a contract's own launch command, or refuse it with a reason.
+
+    Refusing is not falling back. A contract that states how to start itself and
+    states something we will not run gets a skip that names the problem —
+    quietly guessing instead would start a different program from the one the
+    plan declared and report the result as that plan's.
+    """
+    raw = [str(a) for a in spec.command]
+    if len(raw) > MAX_LAUNCH_ARGS:
+        return None, (
+            f"declared launch has {len(raw)} arguments, over the "
+            f"{MAX_LAUNCH_ARGS} allowed"
+        )
+
+    program = PurePosixPath(raw[0].replace("\\", "/")).name.lower()
+    if program.endswith(".exe"):
+        program = program[:-4]
+    if program not in INTERPRETERS:
+        return None, (
+            f"declared launch starts {raw[0]!r}, which is not one of "
+            + ", ".join(sorted(INTERPRETERS))
+        )
+
+    root = output_dir.resolve()
+    argv = [python if program in _PYTHON else program]
+    files: list[Path] = []
+
+    for arg in raw[1:]:
+        if "\x00" in arg:
+            return None, "declared launch contains a null byte"
+        if _PATHISH.search(arg):
+            # Anything naming a file goes through the same containment check
+            # that materialization uses, for the same reason: it came from a
+            # model, and this one ends in an exec rather than a write.
+            try:
+                target = safe_join(root, arg)
+            except UnsafePath as exc:
+                return None, f"declared launch names {arg!r} — {exc}"
+            if not target.is_file():
+                return None, f"declared launch names {arg!r}, which no node produced"
+            files.append(target)
+            argv.append(target.relative_to(root).as_posix())
+        elif _PLAIN_ARG.match(arg):
+            argv.append(arg)
+        else:
+            return None, f"declared launch has an argument this will not pass: {arg!r}"
+
+    if not files:
+        return None, "declared launch names no file from the output folder"
+
+    source = _source_of(files[0])
+    if _looks_degraded(source):
+        return None, f"{files[0].name} is a degraded stub, not an implementation"
+
+    port_declared = spec.port is not None
+    if spec.port is None:
+        ports = candidate_ports(source)
+    elif isinstance(spec.port, int) and 1 <= spec.port <= 65535:
+        ports = (spec.port,)
+    else:
+        return None, f"declared port {spec.port!r} is not a port number"
+
+    ready = str(spec.ready_path or "/").strip()
+    if not ready.startswith("/") or "\x00" in ready or len(ready) > 200:
+        ready = "/"
+
+    return (
+        Launch(
+            argv=tuple(argv),
+            cwd=root,
+            label=files[0].name,
+            ports=ports,
+            ready_path=ready,
+            declared=True,
+            port_declared=port_declared,
+        ),
+        "",
+    )
+
+
+def _discovered_launch(output_dir: Path, *, python: str) -> tuple[Launch | None, str]:
+    """The inference for a contract that declares nothing: the pinned stack."""
+    entrypoint = find_entrypoint(output_dir)
+    if entrypoint is None:
+        return None, (
+            f"no entrypoint in {output_dir} and the contract declares no launch "
+            f"command (looked for {', '.join(ENTRYPOINTS)})"
+        )
+
+    source = _source_of(entrypoint)
+    if _looks_degraded(source):
+        return None, f"{entrypoint.name} is a degraded stub, not an implementation"
+
+    return (
+        Launch(
+            argv=(python, entrypoint.name),
+            cwd=output_dir.resolve(),
+            label=entrypoint.name,
+            ports=candidate_ports(source),
+        ),
+        "",
+    )
+
+
+def plan_launch(
+    output_dir: Path, interface: InterfaceContract, *, python: str | None = None
+) -> tuple[Launch | None, str]:
+    """How to start this project, and on what ports. Returns (launch, refusal).
+
+    Validated here rather than where the contract is parsed, because a contract
+    reaches this point from three directions — a model's decomposition, a
+    checkpoint, or a plan-cache file somebody edited — and only one of those
+    passes through the parser.
+    """
+    spec = interface.launch
+    if not isinstance(spec, LaunchSpec):
+        spec = LaunchSpec()
+    interpreter = python or sys.executable
+    if spec.declared:
+        return _declared_launch(Path(output_dir), spec, python=interpreter)
+    return _discovered_launch(Path(output_dir), python=interpreter)
+
+
 # --------------------------------------------------------------------------
 # HTTP
 # --------------------------------------------------------------------------
@@ -267,7 +448,7 @@ def _has_placeholder(path: str) -> bool:
 # --------------------------------------------------------------------------
 
 
-def _launch(entrypoint: Path, *, python: str) -> tuple[subprocess.Popen, Any, Any]:
+def _launch(launch: Launch) -> tuple[subprocess.Popen, Any, Any]:
     """Start the project. Output goes to temp files, not pipes.
 
     A pipe would deadlock the moment a chatty server filled the OS buffer, and
@@ -277,9 +458,10 @@ def _launch(entrypoint: Path, *, python: str) -> tuple[subprocess.Popen, Any, An
     err = tempfile.TemporaryFile(mode="w+b")
     proc = subprocess.Popen(
         # Executing the artifact is the point of this module; the decision to
-        # allow it was made by the caller, before we got here.
-        [python, entrypoint.name],
-        cwd=str(entrypoint.parent),
+        # allow it was made by the caller, before we got here. `shell` is never
+        # set, so the argv `plan_launch` validated is the argv that runs.
+        list(launch.argv),
+        cwd=str(launch.cwd),
         stdout=out,
         stderr=err,
         stdin=subprocess.DEVNULL,
@@ -360,6 +542,34 @@ def _wait_for_boot(
 # --------------------------------------------------------------------------
 # The run
 # --------------------------------------------------------------------------
+
+
+def _probe_ready(
+    base: str, launch: Launch, report: SmokeReport, timeout: float
+) -> None:
+    """One request at the path the contract says answers when the server is up.
+
+    An open port means a socket was bound, which is not the same as a server
+    that serves — and for an API with no pages, this is the only thing that
+    would notice the difference. A 404 passes: a project with no root route is a
+    normal shape, and the contract only claimed this path is where to look.
+    """
+    status, _, detail = _request(base, "GET", launch.ready_path, timeout=timeout)
+    report.probes.append(Probe("GET", launch.ready_path, status, detail))
+    if status is None:
+        report.add(
+            "error",
+            f"`{launch.ready_path}` got no response ({detail})",
+            where=launch.label,
+            why="the port is open but nothing is answering on it",
+        )
+    elif status >= 500:
+        report.add(
+            "error",
+            f"`{launch.ready_path}` returned {status}",
+            where=launch.label,
+            why="the contract names this path as the sign the server is up",
+        )
 
 
 def _probe_pages(
@@ -524,21 +734,13 @@ def smoke_run(
     report = SmokeReport()
     output_dir = Path(output_dir)
 
-    entrypoint = find_entrypoint(output_dir)
-    if entrypoint is None:
-        report.skipped = (
-            f"no entrypoint in {output_dir} (looked for "
-            f"{', '.join(ENTRYPOINTS)})"
-        )
+    launch, refusal = plan_launch(output_dir, interface, python=python)
+    if launch is None:
+        report.skipped = refusal
         return report
-    report.entrypoint = entrypoint.name
+    report.entrypoint = launch.label
 
-    source = entrypoint.read_text(encoding="utf-8", errors="replace")
-    if _looks_degraded(source):
-        report.skipped = f"{entrypoint.name} is a degraded stub, not an implementation"
-        return report
-
-    ports = candidate_ports(source)
+    ports = launch.ports
     free = usable_ports(ports)
     if not free:
         report.skipped = (
@@ -554,7 +756,7 @@ def smoke_run(
             why="a response from it would have come from another server",
         )
 
-    proc, out, err = _launch(entrypoint, python=python or sys.executable)
+    proc, out, err = _launch(launch)
     try:
         port = _wait_for_boot(proc, free, time.monotonic() + boot_timeout)
 
@@ -563,18 +765,24 @@ def smoke_run(
             if proc.poll() is not None:
                 report.add(
                     "error",
-                    f"{entrypoint.name} exited with code {proc.returncode} "
+                    f"{launch.label} exited with code {proc.returncode} "
                     "instead of serving",
-                    where=entrypoint.name,
+                    where=launch.label,
                     why="the project does not start at all",
                 )
             else:
                 report.add(
                     "error",
-                    f"{entrypoint.name} bound no port within {boot_timeout:.0f}s "
+                    f"{launch.label} bound no port within {boot_timeout:.0f}s "
                     f"(tried {', '.join(str(p) for p in free)})",
-                    where=entrypoint.name,
-                    why="it is running but never began serving",
+                    where=launch.label,
+                    why=(
+                        "the contract declares this port and the server is "
+                        "running without it — most likely the declaration and "
+                        "the code disagree"
+                        if launch.port_declared
+                        else "it is running but never began serving"
+                    ),
                 )
             return report
 
@@ -582,6 +790,12 @@ def smoke_run(
         report.port = port
         base = f"http://127.0.0.1:{port}"
 
+        # Skipped when the ready path is also a declared page: the page check is
+        # the stricter of the two — it counts a 404 as a failure, where this one
+        # accepts it — so probing both would add a row and take evidence away.
+        pages_declared = {str(p).lstrip("/") for p in interface.pages}
+        if launch.ready_path and launch.ready_path.lstrip("/") not in pages_declared:
+            _probe_ready(base, launch, report, request_timeout)
         pages = _probe_pages(base, interface, report, request_timeout)
         _probe_assets(base, pages, report, request_timeout)
         _probe_routes(base, interface, report, request_timeout)
@@ -589,8 +803,8 @@ def smoke_run(
         if proc.poll() is not None:
             report.add(
                 "error",
-                f"{entrypoint.name} died while serving (exit code {proc.returncode})",
-                where=entrypoint.name,
+                f"{launch.label} died while serving (exit code {proc.returncode})",
+                where=launch.label,
             )
         return report
     finally:
@@ -603,8 +817,8 @@ def smoke_run(
         if report.ran and _TRACEBACK in report.stderr_tail:
             report.add(
                 "error",
-                f"{entrypoint.name} raised while serving",
-                where=entrypoint.name,
+                f"{launch.label} raised while serving",
+                where=launch.label,
                 why="a traceback reached stderr; the tail is below",
             )
         out.close()

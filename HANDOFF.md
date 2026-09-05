@@ -1,6 +1,6 @@
 # llmorch — handoff
 
-**State:** M0–M6 done, plus the smoke run. 478 tests pass, 1 skipped on Windows
+**State:** M0–M6 done, plus the smoke run. 503 tests pass, 1 skipped on Windows
 (a symlink test needing admin). Published at github.com/Pranay4040/llmorch,
 tagged `v0.1.0`.
 
@@ -18,7 +18,7 @@ Two things in one repo:
 ## Run it
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q                  # 478 tests, no network
+.venv/Scripts/python.exe -m pytest -q                  # 503 tests, no network
 .venv/Scripts/python.exe -m llmorch run "build a notes app"        # mock, offline
 .venv/Scripts/python.exe -m llmorch run --smoke "<task>"          # ...then run the result
 .venv/Scripts/python.exe -m llmorch run --live --providers all "<task>"
@@ -56,13 +56,15 @@ Ordered by value. Issues #1–#4 are filed on GitHub.
    and asset checks are HTTP-shaped and the call check is `ast`-based, so a JS or
    Go build gets nothing. Keep any new check conservative: a false accusation
    about working code is worse than a missed fault.
-2. **Widen the smoke run past the pinned stack.** `engine/smoke.py` starts the
-   project and drives the contract against it, which is what caught both bugs
-   that reached the output. It assumes the pinned stack: a Python entrypoint it
-   launches with the current interpreter, and a port it reads out of the source
-   because nothing can inject one. A Node or Go build gets a skip, not a run.
-   The honest next step is a declared launch command in the interface contract,
-   so the runtime says how to start itself instead of this module guessing.
+2. **A dependency step before launch.** `InterfaceContract.launch` now lets a
+   plan state how to start itself, so a Node or Go build runs rather than being
+   skipped — verified against a hand-written Node project. What is still missing
+   is anything that needs installing or compiling first: a `package.json` with
+   dependencies starts and dies on the first `require`, and the failure reads as
+   the model's fault when it is the harness's. Whatever is added must stay
+   inside the same rule the launch command follows — the project just written,
+   never an arbitrary command — which makes `npm ci` (lockfile, no scripts)
+   the shape to aim at and `npm install` the shape to avoid.
 3. **Paid providers** (#2). DeepSeek, Moonshot, Fireworks, OpenCode Zen are
    discovered and undeclared. OpenCode Zen fronts Claude and GPT families, so it
    would reopen the roster the way OpenRouter did. Blocked on *verified*
@@ -95,6 +97,16 @@ Each was learned by getting it wrong against a live API.
   it a reviewer passed a file that resolved every page to the drive root.
 - **A reviewer never shares the author's vendor**, review is advisory and never
   fatal, and repairs are capped at one per node.
+- **A refused launch is never a fallback.** A contract that states how to start
+  itself and states something the allowlist will not run gets a skip naming the
+  reason. Quietly guessing `server.py` instead would start a different program
+  from the one the plan declared and report the result as that plan's.
+- **The interpreter allowlist narrows the blast radius; it does not stop code
+  execution.** `--smoke` already runs a model-written file, so that door is open
+  by the time `plan_launch` is reached. What the allowlist keeps out is "any
+  binary on the machine with any arguments": every path argument goes through
+  `materialize.safe_join`, and a command naming no file from the output folder
+  is refused, so what runs is always the project just written.
 - **The smoke run never probes a port it did not open.** A port already
   answering before launch belongs to another server, and its 200s would be
   reported as this project working. Detected by connecting, not by binding —
@@ -110,6 +122,9 @@ Each was learned by getting it wrong against a live API.
 
 ## Gotchas
 
+- A **declared port that disagrees with the code** is a boot timeout, not a
+  quick failure: the run waits on the port the contract named. The error says
+  which declaration is suspect, but the fifteen seconds are spent either way.
 - The smoke run's HTTP client **disables proxies explicitly**. An `http_proxy` in
   the environment otherwise sends a request for 127.0.0.1 to the proxy, and the
   failure reads as the generated server not answering.

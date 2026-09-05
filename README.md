@@ -120,7 +120,17 @@ llmorch resume <run_id>                          # after a quota wall
 ```
 
 `--smoke` starts the generated project, drives the contract's pages and routes
-against it over HTTP, and reports what came back. It is off by default and has
+against it over HTTP, and reports what came back. How to start it is part of the
+contract the planner emits, so it is stated rather than guessed:
+
+```json
+"launch": {"command": ["node", "server.js"], "port": 3000, "ready_path": "/"}
+```
+
+The command is checked before it runs: the program must be a known interpreter,
+and every path in it must resolve inside the output folder, through the same
+containment check that writing those files used. A command that fails either
+test is refused by name — never quietly replaced with a guess. It is off by default and has
 to be asked for: every other step in the system treats model output as untrusted
 data, and this one hands it the interpreter. What it buys is the only evidence in
 a run that did not come from reading the code — a project whose files all parse,
