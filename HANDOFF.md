@@ -23,6 +23,8 @@ Two things in one repo:
 .venv/Scripts/python.exe -m llmorch run --smoke "<task>"          # ...then run the result
 .venv/Scripts/python.exe -m llmorch run --smoke-install "<task>"  # ...installing its deps first
 .venv/Scripts/python.exe -m llmorch run --live --providers all "<task>"
+.venv/Scripts/llmorch.exe                              # a session — the short way in
+.venv/Scripts/llmorch.exe "build a notes app"          # ...with the first thing said
 .venv/Scripts/python.exe -m llmorch chat               # a session, not one shot
 .venv/Scripts/python.exe -m llmorch chat --continue    # ...pick the last one back up
 .venv/Scripts/python.exe -m llmorch resume <run_id>    # after a quota wall
@@ -58,32 +60,44 @@ spends quota.
 
 Ordered by value. Issues #1–#4 are filed on GitHub.
 
-1. **Telling an instruction from a remark.** `llmorch chat` plans every line as
+1. **Enforce the staffing rule instead of asking for it.** `build_revise_prompt`
+   now tells the planner that a route it adds to the contract needs a node that
+   serves it — found by running `chat` and watching a revision add a route,
+   staff nothing, fail the cross-artifact check and 404 under the smoke run.
+   But a prompt is a request, and decision 7 in the original plan is that a
+   constraint you can enforce in code does not belong in a prompt: an LLM told
+   to "split evenly" will not, which is why evenness is an assignment
+   constraint. The same argument applies here. After `revise` returns and
+   before any execution request is spent, the routes a revision adds can be
+   compared against the delta nodes and the existing backend files; an unstaffed
+   promise is then caught for free, rather than after the whole change is paid
+   for.
+2. **Telling an instruction from a remark.** `llmorch chat` plans every line as
    a change, so "what does this do?" or "looks good" spends a planning request
    before anything can notice it asked for nothing. The planner answering with
    zero nodes is handled — the turn says "nothing to change" and records it —
    but the request is spent by then, and against 250 a day that is the cost
    worth removing.
-2. **Arity agreement in JavaScript** (#1, the half still open). Routes, imports
+3. **Arity agreement in JavaScript** (#1, the half still open). Routes, imports
    and imported names now work for JS and Go; what `check_python_calls` does and
    nothing else can is compare *signatures*. `ast` gives Python exact ones, and
    JavaScript defaults, rest parameters and destructured options objects mean a
    regex would report working code as broken. This needs a real parser, which
    means a dependency this project has so far refused — and the missed fault is
    cheaper than the false accusation, so it stays open on purpose.
-3. **A compiled build step, if it is ever worth it.** `--smoke-install` covers
+4. **A compiled build step, if it is ever worth it.** `--smoke-install` covers
    the Node case: a lockfile is enough to install from, and the recipe is
    inferred from which lockfile exists rather than declared by a model. What is
    still not covered is anything needing a *compile* — a Go binary, a TypeScript
    build — and the case for adding it is weaker than it looks: `go run` already
    fetches and compiles, and a build step is where an arbitrary command would
    have to come back in. Worth doing only when a real plan is blocked by it.
-4. **Paid providers** (#2). DeepSeek, Moonshot, Fireworks, OpenCode Zen are
+5. **Paid providers** (#2). DeepSeek, Moonshot, Fireworks, OpenCode Zen are
    discovered and undeclared. OpenCode Zen fronts Claude and GPT families, so it
    would reopen the roster the way OpenRouter did. Blocked on *verified*
    pricing — the manifest rejects a paid provider with no cost, and inventing
    numbers to satisfy that check defeats it.
-5. **Gemini's daily limit** (#4) and **the Mistral/Wafer keys** (#3).
+6. **Gemini's daily limit** (#4) and **the Mistral/Wafer keys** (#3).
 
 ## Do not break these
 

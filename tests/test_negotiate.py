@@ -338,6 +338,11 @@ def test_a_revision_prompt_carries_the_memory_and_the_contract():
 
     assert "ONLY the nodes whose files must be written or rewritten" in system
     assert "never its contents" in system
+    # A contract addition obliges a node to deliver it. Without this the planner
+    # adds a route, staffs nothing, and the change fails the cross-artifact
+    # check and 404s when run — which is what a trial run of `chat` produced.
+    assert "Whatever you add there, you must also staff" in system
+    assert "a node that serves it" in system
     assert "`server.py` (backend) — the API" in user
     assert "GET /api/notes" in user
     assert "add a detail link" in user

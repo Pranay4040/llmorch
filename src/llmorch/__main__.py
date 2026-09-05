@@ -524,6 +524,34 @@ def _chat_command(line: str, history: Conversation, config_dir: Path) -> bool:
     return True
 
 
+def _chat_turn(args, history: Conversation, run_dir: Path, line: str) -> None:
+    """One instruction, planned and carried out against what already exists."""
+    args.task = line
+    args.history = history
+    prior = _read_output(run_dir / "output")
+
+    try:
+        session = _setup(args, run_id=history.session_id)
+    except LLMOrchError as exc:
+        print(f"  {exc}")
+        return
+
+    try:
+        if session.graph.nodes:
+            _execute(session, args, prior=prior, history=history)
+        else:
+            # The planner read the instruction and concluded the project already
+            # satisfies it. Recorded, so the next turn knows it was said and
+            # `/history` shows it.
+            print("  nothing to change")
+            history.record(line, {}, {}, session.scheduler.blackboard.interface)
+            history.save()
+    except LLMOrchError as exc:
+        print(f"  {exc}")
+    finally:
+        session.close()
+
+
 def cmd_chat(args) -> int:
     """A session with the orchestrator rather than one shot at it."""
     session_id = args.session or (latest_session() if args.continue_ else None)
@@ -540,6 +568,12 @@ def cmd_chat(args) -> int:
     print("Type an instruction, or /help. Ctrl-D to leave.\n")
     run_dir = runs_dir() / history.session_id
 
+    # `llmorch "build a notes app"` starts the session with that already said,
+    # so the shortest way in is one line rather than two.
+    if getattr(args, "first", None):
+        print(f"> {args.first}")
+        _chat_turn(args, history, run_dir, args.first)
+
     while True:
         try:
             line = input("> ").strip()
@@ -553,32 +587,7 @@ def cmd_chat(args) -> int:
                 break
             continue
 
-        args.task = line
-        args.history = history
-        prior = _read_output(run_dir / "output")
-
-        try:
-            session = _setup(args, run_id=history.session_id)
-        except LLMOrchError as exc:
-            print(f"  {exc}")
-            continue
-
-        try:
-            if session.graph.nodes:
-                _execute(session, args, prior=prior, history=history)
-            else:
-                # The planner read the instruction and concluded the project
-                # already satisfies it. Recorded, so the next turn knows it was
-                # said and `/history` shows it.
-                print("  nothing to change")
-                history.record(
-                    line, {}, {}, session.scheduler.blackboard.interface
-                )
-                history.save()
-        except LLMOrchError as exc:
-            print(f"  {exc}")
-        finally:
-            session.close()
+        _chat_turn(args, history, run_dir, line)
 
     print(f"Session {history.session_id} saved to {history.path}")
     return 0
@@ -816,7 +825,15 @@ def build_parser() -> argparse.ArgumentParser:
     resume.set_defaults(func=cmd_resume, task=None)
 
     chat = sub.add_parser(
-        "chat", help="a session: the first instruction builds, the rest change it"
+        "chat",
+        aliases=["cli"],
+        help="a session: the first instruction builds, the rest change it",
+    )
+    chat.add_argument(
+        "first",
+        nargs="?",
+        default=None,
+        help="an opening instruction, said for you as the first turn",
     )
     chat.add_argument("--session", default=None, help="continue a specific session id")
     chat.add_argument(
@@ -889,6 +906,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doctor.set_defaults(func=cmd_doctor, task=None)
 
+    # Recorded so `main` can tell "llmorch run …" from "llmorch build a thing".
+    parser.subcommand_names = frozenset(sub.choices)
+
     return parser
 
 
@@ -910,7 +930,19 @@ def _writable_console() -> None:
 def main(argv: list[str] | None = None) -> int:
     _writable_console()
     load_dotenv()
-    args = build_parser().parse_args(argv)
+
+    parser = build_parser()
+    argv = list(sys.argv[1:] if argv is None else argv)
+
+    # `llmorch`, `llmorch "build a notes app"`, `llmorch --live` all open a
+    # session. Anything naming a subcommand is untouched, so `run`, `resume`,
+    # `doctor` and the rest behave exactly as they did.
+    if not argv or (
+        argv[0] not in parser.subcommand_names and argv[0] not in ("-h", "--help")
+    ):
+        argv = ["chat", *argv]
+
+    args = parser.parse_args(argv)
     try:
         return args.func(args)
     except LLMOrchError as exc:

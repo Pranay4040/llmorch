@@ -113,6 +113,8 @@ vendors, assigns each slice by fitness and remaining quota, and writes a
 runnable project folder:
 
 ```bash
+llmorch                                          # a session; the shortest way in
+llmorch "build a notes app"                      # ...with the first thing said
 llmorch run "build a notes app"                  # mock provider, no network
 llmorch run --live --providers all "build a CLI that converts CSV to markdown"
 llmorch run --smoke "build a notes app"          # ...and then run what it wrote
