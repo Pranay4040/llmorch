@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..types import InterfaceContract
@@ -45,7 +45,51 @@ _PLACEHOLDER = re.compile(r"^(\{.*\}|:.+|\$\{.*\}|<.+>)$")
 _MARKUP = (".html", ".htm")
 _SCRIPT = (".js", ".mjs", ".ts")
 _SCHEMA = (".sql",)
-_CODE = (".py", ".js", ".mjs", ".ts", ".rb", ".go")
+_CODE = (".py", ".js", ".mjs", ".ts", ".rb", ".go", ".php")
+
+# What makes a file look like the thing that serves HTTP, per language. Used to
+# tell a backend file from a frontend one, which matters the moment a project is
+# not the pinned stack: in a Node build, `server.js` and `app.js` are both `.js`,
+# and treating the browser script as backend would mean every route it fetches
+# counts as a route the backend serves — a check that can no longer fail.
+_SERVER_MARKERS = (
+    "createserver",          # node http
+    "app.listen",            # express
+    "listenandserve",        # go net/http
+    "http.handlefunc",       # go net/http
+    "basehttprequesthandler",  # python stdlib
+    "httpserver",            # python stdlib, node
+    "flask(",                # python flask
+    "fastapi(",
+    "sinatra",               # ruby
+    "rack::",                # ruby
+)
+
+# A relative module specifier: `require("./db")`, `from "../lib/util.js"`. Bare
+# specifiers are npm packages and none of this module's business.
+_JS_RELATIVE_IMPORT = re.compile(
+    r"""(?:require\s*\(\s*|from\s+|import\s*\(\s*)["'](\.[^"']*)["']"""
+)
+
+# Extensions Node will try for a specifier written without one.
+_JS_RESOLUTION = ("", ".js", ".mjs", ".cjs", ".json", "/index.js", "/index.mjs")
+
+# `const { a, b } = require("./util")` / `import { a, b } from "./util.js"`
+_JS_NAMED_IMPORT = re.compile(
+    r"""(?:const|let|var)\s*\{([^}]*)\}\s*=\s*require\s*\(\s*["'](\.[^"']*)["']\s*\)"""
+    r"""|import\s*\{([^}]*)\}\s*from\s*["'](\.[^"']*)["']"""
+)
+
+# The two export forms this understands well enough to judge. Anything else —
+# `Object.assign(module.exports, …)`, a computed key, a conditional export —
+# means the module is not read at all rather than read badly.
+_JS_EXPORTS_OBJECT = re.compile(r"module\.exports\s*=\s*\{([^}]*)\}")
+_JS_EXPORT_DECL = re.compile(
+    r"""^\s*export\s+(?:async\s+)?(?:function\s*\*?|const|let|var|class)\s+([A-Za-z_$][\w$]*)""",
+    re.MULTILINE,
+)
+_JS_EXPORTS_ASSIGN = re.compile(r"""(?:module\.)?exports(?:\.|\[)""")
+_JS_IDENTIFIER = re.compile(r"^[A-Za-z_$][\w$]*$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +174,98 @@ def local_asset_refs(text: str) -> list[tuple[str, str]]:
     return refs
 
 
+def _frontend_paths(artifacts: dict[str, str]) -> set[str]:
+    """Files the browser loads: markup, plus whatever that markup links."""
+    frontend = {p for p in artifacts if p.lower().endswith(_MARKUP)}
+    for path in list(frontend):
+        for _, target in local_asset_refs(artifacts[path]):
+            if target in artifacts:
+                frontend.add(target)
+    return frontend
+
+
+def backend_artifacts(artifacts: dict[str, str]) -> dict[str, str]:
+    """The files that plausibly serve HTTP.
+
+    On the pinned stack this is trivially "the Python", which is why the first
+    version of `check_routes_are_served` could get away with matching on `.py`.
+    It stops being trivial the moment a build is not the pinned stack: in a Node
+    project `server.js` and `app.js` are both `.js`, and counting the browser
+    script as backend would mean every route it fetches is a route the backend
+    "mentions" — a check that can no longer fail, which is worse than no check,
+    because it reports a pass.
+
+    Two passes, narrow first: code that is not loaded by a page, and then, if any
+    of it looks like a server, only that. Returning the wrong set is how a false
+    accusation gets made, so an empty result is left empty and the caller says
+    nothing.
+    """
+    frontend = _frontend_paths(artifacts)
+    code = {
+        path: text
+        for path, text in artifacts.items()
+        if path.lower().endswith(_CODE) and path not in frontend
+    }
+    servers = {
+        path: text
+        for path, text in code.items()
+        if any(marker in text.lower() for marker in _SERVER_MARKERS)
+    }
+    return servers or code
+
+
+def _resolve_js_import(
+    specifier: str, source_path: str, artifacts: dict[str, str]
+) -> str | None:
+    """Which artifact a relative specifier names, under Node's resolution."""
+    base = PurePosixPath(source_path).parent
+    parts: list[str] = []
+    for segment in (base / specifier).as_posix().split("/"):
+        if segment in ("", "."):
+            continue
+        if segment == "..":
+            if not parts:
+                return None  # climbs out of the project entirely
+            parts.pop()
+        else:
+            parts.append(segment)
+    stem = "/".join(parts)
+    for suffix in _JS_RESOLUTION:
+        if stem + suffix in artifacts:
+            return stem + suffix
+    return None
+
+
+def _js_exported_names(text: str) -> set[str] | None:
+    """What a module exports, or None when that cannot be read confidently.
+
+    None is the common answer and the important one. Judging an import against
+    an export list that is merely most of the exports would accuse working code,
+    so anything this does not fully understand — `exports.foo = …`, a re-export,
+    a default export, a spread or computed key in the exports object — takes the
+    module out of the check entirely rather than being guessed at.
+    """
+    names: set[str] = set(_JS_EXPORT_DECL.findall(text))
+
+    exports_object = _JS_EXPORTS_OBJECT.search(text)
+    if exports_object:
+        for piece in exports_object.group(1).split(","):
+            key = piece.split(":")[0].strip()
+            if not key:
+                continue
+            if not _JS_IDENTIFIER.match(key):
+                return None
+            names.add(key)
+
+    if not names:
+        return None
+    if re.search(r"export\s*\{", text) or "export default" in text:
+        return None
+    if _JS_EXPORTS_ASSIGN.search(text):
+        return None
+    return names
+
+
 # --------------------------------------------------------------------------
 # Checks
 # --------------------------------------------------------------------------
@@ -187,8 +323,13 @@ def check_frontend_calls_are_declared(
     # navigation target, not a contract violation.
     api_prefixes = {p[0] for p in declared if p}
 
+    # The backend is excluded rather than the frontend included: a script no
+    # page links is still frontend code if it is not the server, and dropping it
+    # would lose the check for exactly the modular frontends that need it most.
+    backend = backend_artifacts(artifacts)
+
     for path, text in artifacts.items():
-        if not path.lower().endswith(_SCRIPT + _MARKUP):
+        if not path.lower().endswith(_SCRIPT + _MARKUP) or path in backend:
             continue
         for ref in _CALL_REF.findall(text):
             pattern = route_pattern(ref)
@@ -212,9 +353,15 @@ def check_routes_are_served(
     reasoning about the dispatch. A backend that mentions the route might still
     handle it wrongly; a backend that never mentions it certainly does not
     handle it at all, and that is worth knowing for free.
+
+    Being shallow is what makes it portable: `app.get("/api/notes")`,
+    `http.HandleFunc("/api/notes", …)` and a `path == "/api/notes"` branch all
+    contain the same literal, so this reads Go and JavaScript as well as it reads
+    Python. The part that was not portable was deciding which files are the
+    backend — see `backend_artifacts`.
     """
     report.checks_run.append("routes are served")
-    backend = {p: t for p, t in artifacts.items() if p.lower().endswith(".py")}
+    backend = backend_artifacts(artifacts)
     if not backend:
         return
     blob = "\n".join(backend.values())
@@ -282,6 +429,77 @@ def check_schema_covers_models(
                 )
 
 
+def check_js_imports_resolve(artifacts: dict[str, str], report: ContractReport) -> None:
+    """Every relative module a script imports is a file some node produced.
+
+    The JavaScript form of the check that already exists for stylesheets and
+    scripts a page links, and it fails the same way: the server author writes
+    `require("./db")` because the contract implies a database module, and the
+    node that would have written `db.js` degraded an hour ago, or wrote
+    `database.js` instead.
+
+    Only relative specifiers. A bare `require("express")` names a package, which
+    is the smoke run's business — `--smoke-install` either installs it or says
+    it could not — and not something the artifact set can answer.
+    """
+    report.checks_run.append("js imports resolve")
+    for path, text in artifacts.items():
+        if not path.lower().endswith(_SCRIPT):
+            continue
+        for specifier in dict.fromkeys(_JS_RELATIVE_IMPORT.findall(text)):
+            if _resolve_js_import(specifier, path, artifacts) is None:
+                report.add(
+                    "error",
+                    f"`{path}` imports `{specifier}`, which no node produced",
+                    where=path,
+                    why="a node was dropped, degraded, or wrote a different filename",
+                )
+
+
+def check_js_named_imports(artifacts: dict[str, str], report: ContractReport) -> None:
+    """Names imported from one module are names that module exports.
+
+    The nearest JavaScript can get to `check_python_calls` without a parser, and
+    aimed at the same failure: two models split a build, one wrote
+    `module.exports = { loadNotes }`, the other wrote
+    `const { getNotes } = require("./store")`. Both files are exactly their own
+    spec. The result is `getNotes is not a function` on the first request.
+
+    What it deliberately does not check is arity. Python's version can, because
+    `ast` gives it exact signatures; JavaScript's defaults, rest parameters and
+    destructured options objects mean a regex would report working code as
+    broken, and a false accusation costs more than a missed fault. So this stops
+    at the name — which is the half that can be known for certain.
+    """
+    report.checks_run.append("js imports name real exports")
+    for path, text in artifacts.items():
+        if not path.lower().endswith(_SCRIPT):
+            continue
+        for match in _JS_NAMED_IMPORT.finditer(text):
+            raw_names = match.group(1) or match.group(3) or ""
+            specifier = match.group(2) or match.group(4) or ""
+            target = _resolve_js_import(specifier, path, artifacts)
+            if target is None or target == path:
+                continue  # unresolved is the other check's finding, not this one
+            exported = _js_exported_names(artifacts[target])
+            if exported is None:
+                continue
+
+            for piece in raw_names.split(","):
+                name = piece.split(":")[0].split(" as ")[0].strip()
+                if not name or not _JS_IDENTIFIER.match(name):
+                    continue
+                if name not in exported:
+                    report.add(
+                        "error",
+                        f"`{path}` imports `{name}` from `{specifier}`, which "
+                        f"exports {', '.join(sorted(exported))}",
+                        where=path,
+                        why="the two files were written by different models "
+                        "against the same spec and disagree on the name",
+                    )
+
+
 def check_contract(
     interface: InterfaceContract, artifacts: dict[str, str]
 ) -> ContractReport:
@@ -297,6 +515,8 @@ def check_contract(
     check_routes_are_served(interface, artifacts, report)
     check_schema_covers_models(interface, artifacts, report)
     check_python_calls(artifacts, report)
+    check_js_imports_resolve(artifacts, report)
+    check_js_named_imports(artifacts, report)
     return report
 
 

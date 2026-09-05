@@ -1,6 +1,6 @@
 # llmorch — handoff
 
-**State:** M0–M6 done, plus the smoke run. 514 tests pass, 1 skipped on Windows
+**State:** M0–M6 done, plus the smoke run. 527 tests pass, 1 skipped on Windows
 (a symlink test needing admin). Published at github.com/Pranay4040/llmorch,
 tagged `v0.1.0`.
 
@@ -18,7 +18,7 @@ Two things in one repo:
 ## Run it
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q                  # 514 tests, no network
+.venv/Scripts/python.exe -m pytest -q                  # 527 tests, no network
 .venv/Scripts/python.exe -m llmorch run "build a notes app"        # mock, offline
 .venv/Scripts/python.exe -m llmorch run --smoke "<task>"          # ...then run the result
 .venv/Scripts/python.exe -m llmorch run --smoke-install "<task>"  # ...installing its deps first
@@ -51,12 +51,13 @@ spends quota.
 
 Ordered by value. Issues #1–#4 are filed on GitHub.
 
-1. **Contract checking beyond Python/web** (#1). `engine/contracts.py` catches
-   cross-artifact mismatches — it found a real one where two models disagreed on
-   a function signature and both files were individually perfect. But the route
-   and asset checks are HTTP-shaped and the call check is `ast`-based, so a JS or
-   Go build gets nothing. Keep any new check conservative: a false accusation
-   about working code is worse than a missed fault.
+1. **Arity agreement in JavaScript** (#1, the half still open). Routes, imports
+   and imported names now work for JS and Go; what `check_python_calls` does and
+   nothing else can is compare *signatures*. `ast` gives Python exact ones, and
+   JavaScript defaults, rest parameters and destructured options objects mean a
+   regex would report working code as broken. This needs a real parser, which
+   means a dependency this project has so far refused — and the missed fault is
+   cheaper than the false accusation, so it stays open on purpose.
 2. **A compiled build step, if it is ever worth it.** `--smoke-install` covers
    the Node case: a lockfile is enough to install from, and the recipe is
    inferred from which lockfile exists rather than declared by a model. What is
@@ -96,6 +97,16 @@ Each was learned by getting it wrong against a live API.
   it a reviewer passed a file that resolved every page to the drive root.
 - **A reviewer never shares the author's vendor**, review is advisory and never
   fatal, and repairs are capped at one per node.
+- **Which files are the backend is the portable part of a route check, not the
+  matching.** A route literal looks the same in Python, Go and JavaScript. What
+  broke outside the pinned stack was `.py` as a stand-in for "the server": in a
+  Node build the browser script is `.js` too, and counting it as backend makes
+  every route it fetches look served — a check that can never fail is worse than
+  no check, because it reports a pass.
+- **A module whose exports cannot be read confidently leaves the check.**
+  `exports.foo = …`, a re-export, a default export, a spread in the exports
+  object: any of them and the module is not judged at all. Judging an import
+  against most of a module's exports would accuse working code.
 - **The install recipe is inferred, never declared.** `LaunchSpec.command` is
   model input and is therefore validated; the install is keyed on which lockfile
   the build produced, so there is no second untrusted command to check. Every

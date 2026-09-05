@@ -144,6 +144,15 @@ a run that did not come from reading the code — a project whose files all pars
 all pass review, and all agree with each other can still serve every page from
 the wrong directory, and nothing static will say so.
 
+Before any of that, eight deterministic checks read the finished artifacts as a
+set rather than one at a time — the pages the contract promised exist, the assets
+and modules they reference were written, the frontend calls only declared routes,
+the backend mentions every declared route, and the modules agree with each other
+on names and signatures. They cost no requests and they catch the failure a split
+build makes likely and a single author never would: every file impeccable against
+its own spec, and the project broken because two models agreed with the spec and
+not with each other.
+
 Supporting commands: `doctor --probe` (verify wire names before depending on
 them), `discover` (ask a key which models it can reach, spending no tokens),
 `quota`, `ledger`, `dashboard` (read-only, loopback only).

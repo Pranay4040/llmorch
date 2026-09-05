@@ -251,7 +251,7 @@ def render_contracts(report: "ContractReport") -> str:
     if not report.issues:
         lines.append(
             f"  {len(report.checks_run)} cross-artifact checks passed: "
-            "pages exist, assets resolve, calls match declared routes"
+            + ", ".join(report.checks_run)
         )
         return "\n".join(lines)
 
