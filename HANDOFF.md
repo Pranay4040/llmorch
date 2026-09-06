@@ -179,6 +179,11 @@ Each was learned by getting it wrong against a live API.
   binary on the machine with any arguments": every path argument goes through
   `materialize.safe_join`, and a command naming no file from the output folder
   is refused, so what runs is always the project just written.
+- **`setup.ps1` is proved by CI or not at all**, and the same goes for the
+  shim. Neither can run on the machine they are written on, so the
+  windows-latest job runs `setup.ps1` for real — venv, install, PATH entry,
+  Desktop shortcut — and asserts each of the four. Editing either without that
+  job passing is editing blind.
 - **The Windows shim is proved by CI or not at all.** `llmorch.cmd` cannot run
   on the machine it was written on, so `test_the_repository_shim_runs_the_cli`
   picks the shim for its platform and the windows-latest job is what actually

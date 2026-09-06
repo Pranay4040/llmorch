@@ -182,16 +182,27 @@ Current state, what is next, and the invariants not to break are in
 
 ## Install
 
+**Windows — run this once and you never touch a path again:**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\setup.ps1
+```
+
+It creates the virtualenv, installs llmorch, puts it on your PATH so `llmorch`
+works from any directory, and leaves an `llmorch` shortcut on your Desktop that
+opens its own window. After that, double-click the icon or type `llmorch`.
+
+**Everywhere else:**
+
 ```bash
 pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-That puts an `llmorch` executable in the environment's `bin` (or `Scripts`)
-directory, which answers to a bare `llmorch` only once that directory is on
-PATH — activate the virtualenv and it is. Without activating, the repository
-root carries a shim that needs neither: `./llmorch` on macOS and Linux,
-`llmorch` from `cmd.exe` or `.\llmorch.cmd` from PowerShell.
+That puts an `llmorch` executable in the environment's `bin` directory, which
+answers to a bare `llmorch` only once that directory is on PATH — activate the
+virtualenv and it is. Without activating, the repository root carries a shim
+that needs neither: `./llmorch`, or `llmorch.cmd` on Windows.
 
 CI runs that suite on Linux (3.11 and 3.13) and Windows (3.12), then does a full
 offline demo run with `--smoke` — plan, execute against the mock provider, write
