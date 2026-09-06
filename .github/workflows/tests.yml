@@ -64,3 +64,25 @@ jobs:
         env:
           LLMORCH_RUNS_DIR: ${{ runner.temp }}/llmorch-runs
         run: python -m llmorch run --smoke "build a notes app"
+
+      # setup.ps1 cannot be run on the machine it is written on, and it is the
+      # first thing a Windows user touches — so this job is where it is proved.
+      # It builds its own virtualenv, installs into it, edits the user PATH and
+      # writes a Desktop shortcut, and every one of those is checked below.
+      - name: Windows setup script
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          .\setup.ps1
+          if (-not (Test-Path .\.venv\Scripts\llmorch.exe)) {
+            throw "setup.ps1 did not install the llmorch command"
+          }
+          & .\.venv\Scripts\llmorch.exe --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "the installed llmorch does not run" }
+          $link = Join-Path ([Environment]::GetFolderPath('Desktop')) 'llmorch.lnk'
+          if (-not (Test-Path $link)) { throw "setup.ps1 did not create the shortcut" }
+          $target = (New-Object -ComObject WScript.Shell).CreateShortcut($link)
+          if ($target.Arguments -notlike '*-m llmorch*') {
+            throw "the shortcut does not start llmorch"
+          }
+          Write-Host "setup.ps1 installed, pathed and shortcut llmorch"

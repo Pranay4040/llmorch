@@ -1,0 +1,10 @@
+#!/bin/sh
+# Run llmorch from a checkout without activating the venv or fixing PATH.
+# The Windows twin of this file is llmorch.cmd; see the note there.
+set -e
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+if [ -x "$here/.venv/bin/python" ]; then
+    exec "$here/.venv/bin/python" -m llmorch "$@"
+fi
+exec python3 -m llmorch "$@"
