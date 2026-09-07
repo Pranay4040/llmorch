@@ -385,11 +385,14 @@ const TABS = [
   {id: "crew", label: "Crew", mode: "crew"},
   {id: "runs", label: "Runs"},
 ];
-let active = location.hash.replace("#", "") || "keys";
+// Prefixed, because a bare "#roles" also matches the <div id="roles"> inside
+// the tab and the browser scrolls to it — landing past the header on a page
+// whose header is how you get anywhere else.
+let active = location.hash.replace("#tab-", "") || "keys";
 
 function showTab(id) {
   active = id;
-  history.replaceState(null, "", "#" + id);
+  history.replaceState(null, "", "#tab-" + id);
   for (const section of document.querySelectorAll("section[data-tab]")) {
     section.hidden = section.dataset.tab !== id;
   }

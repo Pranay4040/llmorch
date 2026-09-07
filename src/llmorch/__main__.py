@@ -1103,10 +1103,16 @@ def _smoke_facts(smoke) -> dict | None:
         "installed": smoke.installed[:200],
         "probes": [
             {
-                "path": getattr(probe, "path", ""),
-                "method": getattr(probe, "method", "GET"),
-                "status": getattr(probe, "status", None),
-                "ok": getattr(probe, "ok", False),
+                "path": probe.path,
+                "method": probe.method,
+                "status": probe.status,
+                "detail": probe.detail[:200],
+                # `Probe` records what came back and leaves the judgement to the
+                # report's issues, so the verdict is derived here on the same
+                # rule the engine uses: 4xx and 5xx are faults, and no answer at
+                # all is the worst one. Reading a field `Probe` does not have
+                # painted every 200 red.
+                "ok": probe.status is not None and probe.status < 400,
             }
             for probe in smoke.probes
         ],
