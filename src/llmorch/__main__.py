@@ -45,6 +45,7 @@ from .engine.contracts import artifacts_from_results, check_contract
 from .engine.graph import TaskGraph
 from .chat import Conversation, latest_session, merge_interfaces
 from .engine.materialize import materialize
+from .engine.progress import ProgressWriter
 from .engine.scheduler import Scheduler
 from .engine.smoke import smoke_run
 from .engine.worker import WorkerDeps
@@ -913,10 +914,102 @@ def _bid(session: Session, args) -> list:
         interface=session.scheduler.blackboard.interface,
     )
     bids = asyncio.run(collect_bids(nodes, deps=deps, candidates=candidates))
-    if bids:
+    if bids and getattr(args, "tables", False):
         bidders = len({b.model_id for b in bids})
         print(f"  {len(bids)} bids from {bidders} model(s)")
     return bids
+
+
+def _quiet(*_args, **_kwargs) -> None:
+    """The tables' new destination when `--tables` is off."""
+    return None
+
+
+def dashboard_url() -> str:
+    return f"http://127.0.0.1:{DEFAULT_PORT}"
+
+
+def _contract_facts(contract) -> dict:
+    """The cross-artifact result, as the page needs it.
+
+    Issue text can quote a path or a route a model invented, so it travels as
+    data and the page sets it with `textContent` — the rule the dashboard has
+    always followed about anything a model wrote.
+    """
+    return {
+        "ok": contract.ok,
+        "checks_run": list(contract.checks_run),
+        "issues": [
+            {
+                "severity": issue.severity,
+                "what": issue.what[:300],
+                "where": issue.where[:200],
+                "why": issue.why[:300],
+            }
+            for issue in contract.issues
+        ],
+    }
+
+
+def _smoke_facts(smoke) -> dict | None:
+    """The smoke run, or None when it never happened.
+
+    None and "it passed" are different answers and the page shows them
+    differently: a smoke run that did not happen is the absence of evidence,
+    never a tick.
+    """
+    if smoke is None:
+        return None
+    return {
+        "ran": smoke.ran,
+        "skipped": smoke.skipped[:300],
+        "entrypoint": smoke.entrypoint,
+        "port": smoke.port,
+        "installed": smoke.installed[:200],
+        "probes": [
+            {
+                "path": getattr(probe, "path", ""),
+                "method": getattr(probe, "method", "GET"),
+                "status": getattr(probe, "status", None),
+                "ok": getattr(probe, "ok", False),
+            }
+            for probe in smoke.probes
+        ],
+        "issues": [
+            {"severity": i.severity, "what": i.what[:300], "where": i.where[:200]}
+            for i in smoke.issues
+        ],
+    }
+
+
+def _verdict_line(outcome, materialized, contract, smoke) -> str:
+    """One line for the terminal: what happened, not how.
+
+    Deliberately the same judgement `report.md` opens with — a run whose nodes
+    all succeeded can still have produced a project that does not run, and the
+    line has to be able to say so.
+    """
+    tokens = sum(
+        (r.usage.prompt_tokens + r.usage.completion_tokens)
+        for r in outcome.results.values()
+        if r.usage is not None
+    )
+    bits = [
+        f"{len(materialized.written)} file(s) written",
+        (
+            f"{len(contract.checks_run)} checks passed"
+            if contract.ok
+            else f"{len(contract.errors)} cross-artifact mismatch(es)"
+        ),
+        f"{tokens:,} tokens",
+    ]
+    if smoke is not None:
+        bits.append(
+            "smoke passed"
+            if smoke.ok
+            else ("smoke failed" if smoke.ran else "smoke skipped")
+        )
+    return "  " + "  ·  ".join(bits)
 
 
 def _execute(
@@ -936,6 +1029,22 @@ def _execute(
     it as the project.
     """
     config = session.config
+
+    # The tables live in the browser now. They are a page of numbers that
+    # changes while it is being printed, and a terminal can only show the state
+    # they were in when the run ended — which is the least interesting moment.
+    # `--tables` puts them back for anyone without a browser open.
+    tables = getattr(args, "tables", False)
+    say = print if tables else _quiet
+
+    progress = ProgressWriter(
+        run_dir=config.run_dir,
+        run_id=config.run_id,
+        task=config.task,
+        live=not config.dry_run,
+    )
+    session.scheduler.progress = progress
+
     mode = (
         "dry run — mock provider, no network"
         if config.dry_run
@@ -943,16 +1052,17 @@ def _execute(
     )
     print(f"Task: {config.task}")
     print(f"Run:  {config.run_id}  ({mode})")
+    print(f"      watch it: {dashboard_url()}")
     if session.restored:
-        print(render_restored(session.restored))
+        say(render_restored(session.restored))
 
     bids = _bid(session, args)
     plan = session.scheduler.plan(bids=bids)
-    print(render_plan(plan, session.graph, explain=getattr(args, "explain", False)))
+    say(render_plan(plan, session.graph, explain=getattr(args, "explain", False)))
 
     outcome = asyncio.run(session.scheduler.run(plan, resume=resume))
-    print(render_outcome(outcome, session.graph))
-    print(render_spend(outcome))
+    say(render_outcome(outcome, session.graph))
+    say(render_spend(outcome))
 
     # Seed summaries the mock cannot produce itself.
     if config.dry_run:
@@ -962,12 +1072,12 @@ def _execute(
 
     report = materialize(config.output_dir, session.graph.nodes, outcome.results)
 
-    print("\nOutput")
-    print("=" * 78)
-    print(f"  {config.output_dir}")
-    print(f"  {len(report.written)} written, {len(report.stubbed)} stubbed")
+    say("\nOutput")
+    say("=" * 78)
+    say(f"  {config.output_dir}")
+    say(f"  {len(report.written)} written, {len(report.stubbed)} stubbed")
     for path, reason in report.rejected:
-        print(f"  ! rejected {path}: {reason}")
+        say(f"  ! rejected {path}: {reason}")
 
     # Do the pieces fit each other? Free, deterministic, and the only check
     # that looks across artifacts rather than at one in isolation.
@@ -978,7 +1088,7 @@ def _execute(
         session.scheduler.blackboard.interface,
         {**(prior or {}), **artifacts_from_results(session.graph.nodes, outcome.results)},
     )
-    print(render_contracts(contract))
+    say(render_contracts(contract))
 
     # The only check that runs the code rather than reading it. Opt-in: every
     # other step treats model output as untrusted data, and this one hands it
@@ -991,7 +1101,7 @@ def _execute(
             session.scheduler.blackboard.interface,
             install=wants_install,
         )
-        print(render_smoke(smoke))
+        say(render_smoke(smoke))
 
     # The same findings, written down. Everything above this line lives in
     # scrollback; the artifacts it describes live on disk indefinitely.
@@ -1009,20 +1119,33 @@ def _execute(
         encoding="utf-8",
         newline="\n",
     )
-    print(f"  {report_path}")
+    say(f"  {report_path}")
+    say(render_warnings(outcome.warnings))
 
-    print(render_warnings(outcome.warnings))
+    # Everything the tables held, handed to the page that now holds them. Taken
+    # from the same objects the renderers were given, so the browser and a
+    # `--tables` terminal cannot disagree about what happened.
+    progress.summarise(
+        output_dir=str(config.output_dir),
+        report_path=str(report_path),
+        written=sorted(report.written),
+        stubbed=sorted(report.stubbed),
+        rejected=[{"path": p, "why": why} for p, why in report.rejected],
+        contract=_contract_facts(contract),
+        smoke=_smoke_facts(smoke),
+        warnings=[str(w) for w in outcome.warnings][:40],
+        degraded=sorted(outcome.degraded),
+    )
+    progress.finish("all nodes succeeded" if outcome.all_succeeded else "degraded")
 
+    print(_verdict_line(outcome, report, contract, smoke))
     if outcome.degraded:
         print(
-            f"\n  {len(outcome.degraded)} node(s) degraded. Their work is "
+            f"  {len(outcome.degraded)} node(s) degraded. Their work is "
             f"checkpointed — `llmorch resume {config.run_id}` picks up only "
             "what is missing."
         )
-
-    print("\nRun the result:")
-    print(f"  python {config.output_dir / 'server.py'}")
-    print("  then open http://localhost:8000")
+    print(f"  details: {dashboard_url()}   report: {report_path}")
 
     if history is not None:
         history.record(
@@ -1088,6 +1211,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="--smoke, plus a lockfile-pinned dependency install first "
         "(reaches the network; package install scripts stay disabled)",
     )
+    run.add_argument(
+        "--tables",
+        action="store_true",
+        help="print the full tables here as well as publishing them",
+    )
     run.add_argument("--allow-paid", action="store_true")
     run.add_argument("--max-usd", type=float, default=0.0)
     run.add_argument("--max-nodes", type=int, default=10)
@@ -1115,6 +1243,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--smoke-install",
         action="store_true",
         help="--smoke, plus a lockfile-pinned dependency install first",
+    )
+    resume.add_argument(
+        "--tables",
+        action="store_true",
+        help="print the full tables here as well as publishing them",
     )
     resume.add_argument("--max-nodes", type=int, default=10)
     resume.add_argument("--concurrency", type=int, default=4)
@@ -1149,6 +1282,11 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--smoke-install", action="store_true")
     chat.add_argument("--max-nodes", type=int, default=10)
     chat.add_argument("--concurrency", type=int, default=4)
+    chat.add_argument(
+        "--tables",
+        action="store_true",
+        help="print the full tables here as well as publishing them",
+    )
     chat.add_argument("--explain", action="store_true")
     chat.set_defaults(func=cmd_chat, task=None, negotiate="auto")
 
@@ -1189,6 +1327,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--mock",
         action="store_true",
         help="override the saved mode: mock provider, no network",
+    )
+    start.add_argument(
+        "--tables",
+        action="store_true",
+        help="print the full tables here as well as publishing them",
     )
     start.add_argument("--explain", action="store_true")
     start.set_defaults(func=cmd_start, task=None, negotiate="auto")

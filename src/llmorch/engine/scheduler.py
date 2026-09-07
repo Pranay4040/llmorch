@@ -28,6 +28,7 @@ from .checkpoint import Checkpoint, NodeSnapshot, new_checkpoint
 from .checkpoint import save as save_checkpoint
 from .graph import TaskGraph
 from .health import HealthTracker, ModelHealth
+from .progress import ProgressWriter
 from .worker import WorkerDeps, execute_node
 
 
@@ -70,6 +71,7 @@ class Scheduler:
         ledger: LedgerStore | None = None,
         profiles: Profiles | None = None,
         checkpoints: bool = False,
+        progress: ProgressWriter | None = None,
         sleep=asyncio.sleep,
     ) -> None:
         self.graph = graph
@@ -85,6 +87,11 @@ class Scheduler:
         self.ledger = ledger
         self.profiles = profiles or Profiles()
         self.checkpoints = checkpoints
+        self.progress = progress
+        """Live state for anything watching. Optional, and never load-bearing:
+        every call to it is wrapped by the writer itself, because a run that
+        died over its own progress file would be monitoring that costs more
+        than it reports."""
         self.sleep = sleep
 
     # -- assignment -------------------------------------------------------
@@ -165,6 +172,15 @@ class Scheduler:
             )
         outcome.warnings.extend(plan.notes)
 
+        if self.progress is not None:
+            self.progress.begin(
+                self.graph.nodes, outcome.assignments, headroom=self.governor.headroom
+            )
+            for node_id in carried:
+                self.progress.restored(node_id, outcome.results[node_id])
+            for node_id in plan.unassigned:
+                self.progress.node_finished(node_id, outcome.results[node_id])
+
         book = None
         if self.checkpoints:
             book = resume or new_checkpoint(
@@ -210,6 +226,8 @@ class Scheduler:
                         if self.graph.dependents_of(node_id)
                         else Priority.NORMAL
                     )
+                    if self.progress is not None:
+                        self.progress.node_started(node_id, model_id)
                     result = await execute_node(node, model_id, deps, priority=priority)
                     return node_id, result
 
@@ -217,6 +235,8 @@ class Scheduler:
                 *(run_one(n) for n in ready)
             ):
                 outcome.results[node_id] = result
+                if self.progress is not None:
+                    self.progress.node_finished(node_id, result)
                 self.blackboard.record(result)
                 # What actually happened is the only input to the dispatcher
                 # that was not assumed in advance.

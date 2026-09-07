@@ -32,6 +32,7 @@ PAGE = """<!doctype html>
     }
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
     font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -67,6 +68,15 @@ PAGE = """<!doctype html>
   .tag { color: var(--muted); font-size: 11px; border: 1px solid var(--line);
          border-radius: 3px; padding: 0 5px; }
   footer { padding: 0 24px 32px; color: var(--muted); font-size: 12px; }
+  .totals { display: flex; flex-wrap: wrap; gap: 8px 28px; margin: 6px 0 12px; }
+  .totals b { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+         margin-right: 7px; vertical-align: middle; background: var(--muted); }
+  .dot.running { background: var(--bar); animation: pulse 1s ease-in-out infinite; }
+  .dot.done { background: var(--ok); }
+  .dot.degraded { background: var(--bad); }
+  @keyframes pulse { 50% { opacity: .25; } }
+  #nowverdict div { padding: 2px 0; }
 </style>
 </head>
 <body>
@@ -78,7 +88,18 @@ PAGE = """<!doctype html>
 </header>
 
 <main>
-  <section><h2>Quota — today</h2><div class="body"><table id="quota"></table></div></section>
+  <section id="now" style="grid-column: 1 / -1" hidden>
+    <h2>This run <span class="tag" id="nowstate"></span></h2>
+    <div class="body">
+      <div id="nowtask" class="wrap muted"></div>
+      <div id="nowtotals" class="totals"></div>
+      <table id="nownodes"></table>
+      <table id="nowmodels"></table>
+      <div id="nowsource" class="muted wrap" style="margin:6px 0 10px"></div>
+      <div id="nowverdict"></div>
+    </div>
+  </section>
+  <section><h2>Quota — today <span class="tag">from the ledger</span></h2><div class="body"><table id="quota"></table></div></section>
   <section><h2>Runs</h2><div class="body"><table id="runs"></table></div></section>
   <section><h2>Spend by day</h2><div class="body"><table id="spend"></table></div></section>
   <section><h2>Track record</h2><div class="body"><table id="track"></table></div></section>
@@ -137,8 +158,121 @@ function duration(seconds) {
   return h + "h" + String(m).padStart(2, "0") + "m";
 }
 
+function stat(host, label, value) {
+  const box = document.createElement("span");
+  const name = document.createElement("span");
+  name.className = "muted";
+  name.textContent = label + " ";
+  const strong = document.createElement("b");
+  strong.textContent = value;
+  box.append(name, strong);
+  host.appendChild(box);
+}
+
+function state_cell(tr, state) {
+  const td = tr.insertCell();
+  const dot = document.createElement("span");
+  dot.className = "dot " + (state === "running" ? "running"
+                  : state === "done" ? "done"
+                  : state === "pending" ? "" : "degraded");
+  td.append(dot, document.createTextNode(state));
+  return td;
+}
+
+function renderCurrent(run) {
+  const panel = $("now");
+  if (!run) { panel.hidden = true; return; }
+  panel.hidden = false;
+
+  const t = run.totals;
+  $("nowstate").textContent = run.active ? "running"
+      : run.finished ? "finished" : "stopped";
+  // Task text comes from whoever typed it and node titles from the planner:
+  // both are set as text, like everything else on this page.
+  $("nowtask").textContent = run.run_id + " · " + (run.task || "");
+
+  const totals = $("nowtotals");
+  totals.replaceChildren();
+  stat(totals, "nodes", t.settled + "/" + t.nodes);
+  stat(totals, "in flight", String(t.running));
+  stat(totals, "prompt", t.prompt_tokens.toLocaleString());
+  stat(totals, "output", t.completion_tokens.toLocaleString());
+  stat(totals, "tokens", (t.prompt_tokens + t.completion_tokens).toLocaleString());
+  stat(totals, "mode", run.live ? "live" : "mock");
+
+  table($("nownodes"), ["node", "role", "model", "state", "try", "prompt", "output", "note"],
+    run.nodes, (tr, n) => {
+      put(tr, n.node_id);
+      put(tr, n.role);
+      put(tr, n.model_id || "—");
+      state_cell(tr, n.state);
+      put(tr, n.attempts || "—", "num");
+      put(tr, n.prompt_tokens ? n.prompt_tokens.toLocaleString() : "—", "num");
+      put(tr, n.completion_tokens ? n.completion_tokens.toLocaleString() : "—", "num");
+      put(tr, n.error || "", "wrap" + (n.state === "degraded" ? " bad" : " muted"));
+    });
+
+  const spent = {};
+  for (const row of run.by_model) spent[row.model_id] = row;
+  table($("nowmodels"), ["model", "calls", "tokens this run", "today (provider)", "per-minute tokens"],
+    run.headroom, (tr, h) => {
+      const mine = spent[h.model_id];
+      put(tr, h.model_id, h.healthy ? "" : "bad");
+      put(tr, mine ? mine.calls : 0, "num");
+      put(tr, mine ? (mine.prompt_tokens + mine.completion_tokens).toLocaleString() : "—", "num");
+      put(tr, h.requests_limit ? h.requests_used + "/" + h.requests_limit : "—", "num");
+      put(tr, h.tokens_limit_minute
+            ? h.tokens_used_minute.toLocaleString() + "/" + h.tokens_limit_minute.toLocaleString()
+            : "—", "num");
+    });
+
+  // The two "today" numbers on this page are different facts and disagree on
+  // purpose. Saying which is which is the whole job here: a page carrying two
+  // numbers under one name is how nobody ends up trusting either.
+  $("nowsource").textContent =
+    "today (provider) is the vendor's own count, taken from the headers of this "
+    + "run's replies and preferred by admission control. Quota below is this "
+    + "machine's ledger. They differ when a vendor counts a day differently "
+    + "than we recorded it.";
+
+  const verdict = $("nowverdict");
+  verdict.replaceChildren();
+  const s = run.summary || {};
+  const line = (text, cls) => {
+    const div = document.createElement("div");
+    div.textContent = text;
+    if (cls) div.className = cls;
+    verdict.appendChild(div);
+  };
+  if (s.output_dir) line("output: " + s.output_dir, "muted");
+  if (s.contract) {
+    line(s.contract.ok
+      ? s.contract.checks_run.length + " cross-artifact checks passed: " + s.contract.checks_run.join(", ")
+      : s.contract.issues.length + " cross-artifact mismatch(es)",
+      s.contract.ok ? "ok" : "bad");
+    for (const issue of s.contract.issues) {
+      line("  " + issue.severity + ": " + issue.what + (issue.where ? "  (" + issue.where + ")" : ""),
+           issue.severity === "error" ? "bad wrap" : "warn wrap");
+    }
+  }
+  if (s.smoke === null || s.smoke === undefined) {
+    if (s.output_dir) line("smoke run: not started — pass --smoke to run what was written", "muted");
+  } else if (!s.smoke.ran) {
+    line("smoke run skipped: " + s.smoke.skipped, "warn wrap");
+  } else {
+    for (const probe of s.smoke.probes) {
+      line("  " + probe.method + " " + probe.path + " -> " + (probe.status === null ? "no answer" : probe.status),
+           probe.ok ? "ok" : "bad");
+    }
+    for (const issue of s.smoke.issues) line("  " + issue.what, "bad wrap");
+  }
+  for (const warning of (s.warnings || [])) line("· " + warning, "muted wrap");
+  if (s.report_path) line("report: " + s.report_path, "muted");
+}
+
 function render(state) {
   $("generated").textContent = "updated " + state.generated_utc.slice(11, 19) + " UTC";
+  renderCurrent(state.current);
 
   table($("quota"), ["model", "requests", "", "per-minute tokens", "resets in"],
     state.quota, (tr, q) => {
@@ -207,13 +341,25 @@ async function poll() {
       return;
     }
     render(state);
+    schedule(state.current && state.current.active ? 2000 : 5000);
   } catch (err) {
     $("generated").textContent = "not reachable — is llmorch dashboard still running?";
   }
 }
 
+let period = 0;
+function schedule(ms) {
+  if (ms === period) return;
+  period = ms;
+  clearInterval(timer);
+  timer = setInterval(poll, ms);
+}
+
+// Two seconds while something is happening, five when nothing is. A run's
+// numbers move faster than the ledger's do, and polling that hard when the
+// machine is idle is just noise on somebody's laptop.
+let timer = setInterval(poll, 5000);
 poll();
-setInterval(poll, 5000);
 </script>
 </body>
 </html>

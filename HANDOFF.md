@@ -1,6 +1,6 @@
 # llmorch — handoff
 
-**State:** M0–M6 done, plus the smoke run, the question lane and the setup page. 670 tests pass,
+**State:** M0–M6 done, plus the smoke run, the question lane, the setup page and live run tracking. 689 tests pass,
 1 skipped on Windows (a symlink test needing admin). Published at
 github.com/Pranay4040/llmorch, tagged `v0.1.0`.
 
@@ -18,7 +18,7 @@ Two things in one repo:
 ## Run it
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q                  # 670 tests, no network
+.venv/Scripts/python.exe -m pytest -q                  # 689 tests, no network
 .venv/Scripts/python.exe -m llmorch run "build a notes app"        # mock, offline
 .venv/Scripts/python.exe -m llmorch run --smoke "<task>"          # ...then run the result
 .venv/Scripts/python.exe -m llmorch run --smoke-install "<task>"  # ...installing its deps first
@@ -109,6 +109,31 @@ Ordered by value. Issues #1–#4 are filed on GitHub.
 
 Each was learned by getting it wrong against a live API.
 
+- **A run's numbers belong in the browser, because they move.** The terminal
+  printed five tables describing the state everything was in when the run
+  ended. A run now publishes `runs/<id>/progress.json` as it goes — the same
+  file-and-poll shape the checkpoint already established, since the dashboard is
+  a different process — and the terminal keeps a verdict line and a URL.
+  `--tables` restores the old output.
+- **A node in flight reports no tokens.** The governor reserves on an estimate
+  and reconciles on commit, so a node that has not come back has a budget and
+  not a bill. Publishing the estimate as spend would show a total that walks
+  backwards when the wave lands, which is the sort of number people stop
+  trusting.
+- **Nothing writes "finished" on a dead run's behalf.** The progress file is all
+  a killed process leaves behind, so a run is *active* only while its file is
+  moving. The staleness window is 90s, because a node waiting out a per-minute
+  rate limit is working, and calling that stopped misreports the most
+  interesting moment there is.
+- **Monitoring may never fail the run it describes.** Every write is wrapped and
+  every headroom reading is guarded; a progress file that cannot be written is
+  silence, not an exception.
+- **The two "today" figures on the dashboard disagree on purpose, and each says
+  which it is.** The run panel's comes from the vendor's rate-limit headers —
+  fact, and what admission control believes — while the quota table's is the
+  ledger replay. Found by watching them differ by nine on one screen with
+  nothing on the page to explain it, which is how a reader learns to trust
+  neither.
 - **The setup page is the only thing here that accepts a write, and it is
   guarded as one.** The dashboard's header states that being read-only is *why*
   it needs no authentication; that argument does not extend to a page which

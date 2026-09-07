@@ -203,6 +203,19 @@ evenly the work landed, and what the checks and the smoke run found. The
 artifacts stay on disk indefinitely and look equally plausible either way; the
 evidence about them should not be the one part that lives in scrollback.
 
+**The tables are in the browser, not the terminal.** A run's numbers change
+while it is happening, and a terminal can only show the state they were in when
+it ended — which is the least interesting moment. So a run publishes what it is
+doing to its own directory as it goes, and `llmorch dashboard` shows it live:
+which node each model has right now, how many attempts it is on, tokens as each
+one lands, and what is left of the day. The terminal keeps a verdict and a URL.
+`--tables` puts the full output back for anyone without a browser open.
+
+Two "today" figures appear on that page and they disagree on purpose. The
+run panel's comes from the vendor's own rate-limit headers and is what admission
+control believes; the quota table's is this machine's ledger. Each says which it
+is, because two numbers under one name is how a reader ends up trusting neither.
+
 Supporting commands: `doctor --probe` (verify wire names before depending on
 them), `discover` (ask a key which models it can reach, spending no tokens),
 `quota`, `ledger`, `dashboard` (read-only, loopback only).
