@@ -80,6 +80,13 @@ class Settings:
     this", and it is not a way to disable the ladder underneath it.
     """
 
+    mode: str = ""
+    """chat | agent | crew, or empty to be asked at the start of every session.
+
+    Empty is the default because the question is cheap and the mismatch is not:
+    someone who wanted to ask a question and got a six-file project has paid for
+    the misunderstanding."""
+
     review: str = "code"
     smoke: bool = False
     smoke_install: bool = False
@@ -101,6 +108,7 @@ class Settings:
             "providers": list(self.providers),
             "models": list(self.models),
             "role_models": dict(self.role_models),
+            "mode": self.mode,
             "review": self.review,
             "smoke": self.smoke,
             "smoke_install": self.smoke_install,
@@ -184,6 +192,7 @@ def from_dict(raw: Any) -> Settings:
         providers=_names(raw.get("providers")),
         models=_names(raw.get("models")),
         role_models=_pairs(raw.get("role_models")),
+        mode=str(raw.get("mode") or "").strip().lower(),
         review=review if review in REVIEW_MODES else "code",
         smoke=bool(raw.get("smoke", False)),
         smoke_install=bool(raw.get("smoke_install", False)),

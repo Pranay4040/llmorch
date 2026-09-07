@@ -431,3 +431,23 @@ def test_start_says_when_nothing_was_ever_configured(monkeypatch, capsys):
     monkeypatch.setattr(cli, "cmd_chat", lambda args: 0)
     assert cli.main(["start"]) == 0
     assert "Nothing saved yet" in capsys.readouterr().out
+
+
+def test_the_mode_can_be_chosen_on_the_page(site):
+    """`Settings.mode` is reachable from the UI, not only by hand-editing JSON."""
+    base, token = site
+    with _post(f"{base}/api/settings", {"mode": "agent"}, token=token) as response:
+        assert json.loads(response.read())["ok"] is True
+
+    assert settings_module.load().mode == "agent"
+
+
+def test_leaving_the_mode_empty_means_ask_every_time(site):
+    base, token = site
+    with _post(f"{base}/api/settings", {"mode": ""}, token=token) as response:
+        assert json.loads(response.read())["ok"] is True
+
+    from llmorch import mode as mode_module
+
+    assert settings_module.load().mode == ""
+    assert mode_module.parse(settings_module.load().mode) is None

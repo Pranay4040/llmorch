@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from . import mode as mode_module
 from . import settings as settings_module
 from .config import RunConfig, load_dotenv, runs_dir, state_db_path
 from .configure.server import DEFAULT_PORT as CONFIGURE_PORT
@@ -455,7 +456,27 @@ def _pins(args, manifest: Manifest, warnings: list[str]) -> dict:
     """
     from .negotiate.roles import parse_role
 
-    wanted = getattr(args, "role_models", None) or {}
+    wanted = dict(getattr(args, "role_models", None) or {})
+
+    # One agent is every job pinned to one model — the same mechanism the *Who
+    # does what* tab uses, applied to all of them at once rather than a separate
+    # code path. An explicit pin still wins: choosing this mode says how many
+    # models, not which.
+    if mode_module.parse(getattr(args, "mode", None)) is mode_module.Mode.AGENT:
+        reachable = sorted(m.id for m in manifest.enabled_models)
+        soloist = next(iter(wanted.values()), None) or pick_planner(
+            manifest, reachable
+        )
+        if soloist is None:
+            warnings.append("one-agent mode: no model available to be the agent")
+        else:
+            for role in Role:
+                wanted.setdefault(role.value, soloist)
+            warnings.append(
+                f"one agent: {soloist} writes every file. Cross-vendor review "
+                "cannot run — there is no second vendor to ask"
+            )
+
     if not wanted:
         return {}
 
@@ -797,6 +818,12 @@ def _chat_turn(
     the entire point: "looks good" used to buy a planning request in order to be
     told there was nothing to plan.
     """
+    if intent is None and mode_module.parse(getattr(args, "mode", None)) is (
+        mode_module.Mode.CHAT
+    ):
+        # The standing version of `/ask`. `/build` still overrides it, because a
+        # mode is a default and not a lock.
+        intent = Intent.ASK
     lane = intent or classify(line)
 
     # Named here, before anything of this session touches the disk: the id is a
@@ -861,7 +888,23 @@ def cmd_chat(args) -> int:
             f"{len(history.files)} file(s)."
         )
 
-    print("Type an instruction, or /help. Ctrl-D to leave.\n")
+    # Asked before anything is said, because the mismatch is what costs: a
+    # person who wanted to ask a question and got a six-file project has already
+    # paid for the misunderstanding. A resumed session keeps the mode it was
+    # opened in — a conversation whose files a crew wrote is not one that a
+    # single agent has been having — and `--mode` or a saved setting skips it.
+    chosen = (
+        mode_module.parse(getattr(args, "mode", None))
+        or mode_module.parse(history.mode)
+        or mode_module.parse(settings_module.load().mode)
+    )
+    if chosen is None:
+        chosen = mode_module.ask()
+    history.mode = chosen.value
+    args.mode = chosen.value
+    print(f"\n{mode_module.describe(chosen)}")
+
+    print("\nType an instruction, or /help. Ctrl-D to leave.\n")
 
     # `llmorch "build a notes app"` starts the session with that already said,
     # so the shortest way in is one line rather than two.
@@ -926,6 +969,8 @@ def cmd_start(args) -> int:
     args.providers = ",".join(chosen.providers) if chosen.providers else "all"
     args.models = chosen.models
     args.role_models = dict(chosen.role_models)
+    if getattr(args, "mode", None) is None and chosen.mode:
+        args.mode = chosen.mode
     args.review = chosen.review
     args.smoke = chosen.smoke
     args.smoke_install = chosen.smoke_install
@@ -1360,6 +1405,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print the full tables here as well as publishing them",
     )
+    chat.add_argument(
+        "--mode",
+        choices=[m.value for m in mode_module.Mode],
+        default=None,
+        help="chat | agent | crew; skips the question at the start",
+    )
     chat.add_argument("--explain", action="store_true")
     chat.set_defaults(func=cmd_chat, task=None, negotiate="auto")
 
@@ -1405,6 +1456,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--tables",
         action="store_true",
         help="print the full tables here as well as publishing them",
+    )
+    start.add_argument(
+        "--mode",
+        choices=[m.value for m in mode_module.Mode],
+        default=None,
+        help="chat | agent | crew; skips the question at the start",
     )
     start.add_argument("--explain", action="store_true")
     start.set_defaults(func=cmd_start, task=None, negotiate="auto")

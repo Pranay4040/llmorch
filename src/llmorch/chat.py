@@ -124,6 +124,12 @@ class Conversation:
     turns: list[Turn] = field(default_factory=list)
     interface: InterfaceContract = field(default_factory=InterfaceContract)
     files: dict[str, FileNote] = field(default_factory=dict)
+    mode: str = ""
+    """chat | agent | crew — how this session was opened.
+
+    Remembered so `--continue` resumes the session it was rather than asking
+    again and possibly getting a different answer: a conversation whose files
+    were written by a crew is not a conversation one agent has been having."""
 
     # ------------------------------------------------------------------
     # State
@@ -333,6 +339,7 @@ class Conversation:
         payload = {
             "version": CONVERSATION_VERSION,
             "session_id": self.session_id,
+            "mode": self.mode,
             "turns": [t.to_dict() for t in self.turns],
             "files": [n.to_dict() for n in self.files.values()],
             "interface": {
@@ -364,6 +371,7 @@ class Conversation:
         interface_raw = raw.get("interface") or {}
         conversation = cls(
             session_id=str(raw.get("session_id") or session_id),
+            mode=str(raw.get("mode") or ""),
             turns=[Turn.from_dict(t) for t in raw.get("turns") or []],
             interface=InterfaceContract(
                 routes=tuple(interface_raw.get("routes") or ()),

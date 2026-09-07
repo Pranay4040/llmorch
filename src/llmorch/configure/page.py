@@ -155,6 +155,14 @@ PAGE = """<!doctype html>
   <section data-tab="runs">
     <h2>How runs behave</h2>
     <div class="opts">
+      <label class="check">mode
+        <select id="mode">
+          <option value="">ask me at the start of each session</option>
+          <option value="chat">chat — questions only</option>
+          <option value="agent">one agent — a single model writes everything</option>
+          <option value="crew">a crew — several models, cross-vendor review</option>
+        </select>
+      </label>
       <label class="check"><input type="checkbox" id="live"> call real providers</label>
       <label class="check">review
         <select id="review">
@@ -276,6 +284,7 @@ function drawUnstaffed() {
 function drawSettings() {
   const s = config.settings;
   document.getElementById("live").checked = s.live;
+  document.getElementById("mode").value = s.mode || "";
   document.getElementById("review").value = s.review;
   document.getElementById("smoke").checked = s.smoke;
   document.getElementById("smoke_install").checked = s.smoke_install;
@@ -436,6 +445,7 @@ document.getElementById("save").addEventListener("click", async () => {
   const picked = chosenModels();
   const payload = {
     live: document.getElementById("live").checked,
+    mode: document.getElementById("mode").value,
     review: document.getElementById("review").value,
     smoke: document.getElementById("smoke").checked,
     smoke_install: document.getElementById("smoke_install").checked,

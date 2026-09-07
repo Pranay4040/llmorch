@@ -161,6 +161,27 @@ back up. A session is named after the first thing you ask it for —
 is what makes these sort chronologically, which is how "the most recent session"
 is worked out.
 
+**A session asks what kind of session it is**, before anything is said:
+
+```
+How should this session work?
+
+  1  Chat        questions only — nothing gets built
+  2  One agent   a single model plans and writes every file
+  3  A crew      several models split the work and review each other  (default)
+```
+
+None of the three is a separate implementation. Chat is the question lane as a
+standing choice, one agent is every job pinned to one model, and a crew is what
+the system does anyway — which is why each can be described honestly, including
+what it gives up: pin every job to one model and cross-vendor review stops
+happening, because there is no second vendor left to ask.
+
+A mode is a default, not a lock — `/build` still builds inside a chat session.
+`--mode chat|agent|crew` skips the question, the setup page can answer it once
+for good, and a resumed session keeps the mode it was opened in. A
+non-interactive stdin is never prompted.
+
 **Not every line is an instruction.** "what does the server do?" is a question
 and "looks good" is neither, and a session that planned both spent a request to
 be told there was nothing to plan. Which lane a line belongs in is a property of

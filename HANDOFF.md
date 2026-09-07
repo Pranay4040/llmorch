@@ -1,6 +1,6 @@
 # llmorch — handoff
 
-**State:** M0–M6 done, plus the smoke run, the question lane, the setup page, live run tracking and per-job model choice. 715 tests pass,
+**State:** M0–M6 done, plus the smoke run, the question lane, the setup page, live run tracking per-job model choice and the three session modes. 743 tests pass,
 1 skipped on Windows (a symlink test needing admin). Published at
 github.com/Pranay4040/llmorch, tagged `v0.1.0`.
 
@@ -18,7 +18,7 @@ Two things in one repo:
 ## Run it
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q                  # 715 tests, no network
+.venv/Scripts/python.exe -m pytest -q                  # 743 tests, no network
 .venv/Scripts/python.exe -m llmorch run "build a notes app"        # mock, offline
 .venv/Scripts/python.exe -m llmorch run --smoke "<task>"          # ...then run the result
 .venv/Scripts/python.exe -m llmorch run --smoke-install "<task>"  # ...installing its deps first
@@ -109,6 +109,18 @@ Ordered by value. Issues #1–#4 are filed on GitHub.
 
 Each was learned by getting it wrong against a live API.
 
+- **The three session modes are settings, not implementations.** Chat is the
+  question lane as a standing choice, one agent is every job pinned at once, and
+  a crew is the default behaviour. Adding a fourth mode should mean finding
+  another setting of the same machinery, not another code path.
+- **A mode says what it gives up.** One agent cannot have cross-vendor review —
+  `pick_reviewer` requires a different vendor than the author and there is not
+  one — so the menu says so before the choice rather than leaving it to be
+  inferred from a report with no review section.
+- **Nobody is asked who is not there to answer.** The mode prompt checks
+  `stdin.isatty()` first. A menu printed at a pipe would consume the first line
+  of input as the answer to a question the pipe never saw, which is exactly what
+  happened the first time — the whole test suite failed on it.
 - **A session is named once, before anything of it is on disk.** The id is a
   directory name, a checkpoint key and the `run_id` on every ledger row the
   session produces, so the one safe moment to name it is the first instruction —
