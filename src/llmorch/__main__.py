@@ -74,7 +74,7 @@ from .negotiate.profiles import Profiles
 from .quota.governor import Governor
 from .quota.store import DayUsage, LedgerStore, restore_governor
 from .registry.manifest import Manifest, load_manifest
-from .types import InterfaceContract
+from .types import InterfaceContract, Role
 from .report.document import REPORT_NAME, render_run_report
 from .report.ledger import render_day_usage, render_recent, render_restored
 from .report.render import (
@@ -125,6 +125,11 @@ class Roster:
     mock: MockProvider | None
     profiles: Profiles
     warnings: list[str] = field(default_factory=list)
+    pins: dict = field(default_factory=dict)
+    """role -> the model a person chose for it, already validated against this
+    run's roster. Every chooser reads it: the reconciler for the files, and
+    `pick_planner` / `pick_answerer` / `pick_reviewer` for the three jobs no
+    node ever carries."""
 
     def close(self) -> None:
         # The track record is the only thing here that took live requests to
@@ -218,7 +223,7 @@ def _worker_deps(
 
 def _plan(
     args, *, config, manifest, governor, registry, estimator, profiles, store,
-    stored_plan: dict | None = None,
+    stored_plan: dict | None = None, pins: dict | None = None,
 ):
     """Decide the task graph, spending as little as possible to get it.
 
@@ -247,7 +252,9 @@ def _plan(
             estimator=estimator, profiles=profiles, store=store, config=config,
             interface=history.interface,
         )
-        planner = pick_planner(manifest, sorted(registry.model_ids))
+        planner = pick_planner(
+            manifest, sorted(registry.model_ids), prefer=(pins or {}).get(Role.PLANNING)
+        )
         if planner is None:
             raise DecomposeError("no model available to plan this change")
         change = asyncio.run(
@@ -294,7 +301,9 @@ def _plan(
         estimator=estimator, profiles=profiles, store=store, config=config,
         interface=InterfaceContract(),
     )
-    planner = pick_planner(manifest, sorted(registry.model_ids))
+    planner = pick_planner(
+        manifest, sorted(registry.model_ids), prefer=(pins or {}).get(Role.PLANNING)
+    )
     if planner is None:
         raise DecomposeError("no model available to plan this task")
 
@@ -414,6 +423,8 @@ def _roster(args, *, run_id: str | None = None) -> Roster:
     if store is not None:
         restored = restore_governor(governor, store, manifest)
 
+    pins = _pins(args, manifest, warnings)
+
     return Roster(
         manifest=manifest,
         config=config,
@@ -425,7 +436,42 @@ def _roster(args, *, run_id: str | None = None) -> Roster:
         mock=mock,
         profiles=profiles,
         warnings=warnings,
+        pins=pins,
     )
+
+
+def _pins(args, manifest: Manifest, warnings: list[str]) -> dict:
+    """Turn the saved role→model choices into something the scheduler can use.
+
+    Validated at this boundary rather than trusted, and forgiving in the same
+    way the model list is: the file was written when `models.yaml` said
+    something else, and a retired model must not be the reason a session refuses
+    to start. An unusable pin is dropped with a note, never raised.
+    """
+    from .negotiate.roles import parse_role
+
+    wanted = getattr(args, "role_models", None) or {}
+    if not wanted:
+        return {}
+
+    known = {m.id for m in manifest.enabled_models}
+    valid_roles = {role.value: role for role in Role}
+    pins: dict = {}
+
+    for role_name, model_id in wanted.items():
+        role = valid_roles.get(str(role_name).strip().lower())
+        if role is None:
+            warnings.append(f"pinned an unknown role {role_name!r} — ignored")
+            continue
+        if model_id not in known:
+            warnings.append(
+                f"{role.value} is pinned to {model_id}, which is not in this "
+                "run's roster — assigned automatically"
+            )
+            continue
+        pins[role] = model_id
+
+    return pins
 
 
 def _setup(
@@ -446,10 +492,10 @@ def _setup(
         profiles=profiles,
         store=store,
         stored_plan=stored_plan,
+        pins=roster.pins,
     )
     graph = TaskGraph.build(nodes)
     graph.prune_to_budget(config.max_nodes)
-    graph.warnings.extend(roster.warnings)
     if plan_note:
         graph.warnings.append(plan_note)
 
@@ -464,7 +510,9 @@ def _setup(
         ledger=store,
         profiles=profiles,
         checkpoints=True,
+        pins=roster.pins,
     )
+    graph.warnings.extend(roster.warnings)
     return Session(roster=roster, graph=graph, scheduler=scheduler)
 
 
@@ -680,7 +728,11 @@ def _answer_question(
     """
     roster = _roster(args, run_id=history.session_id)
     try:
-        model_id = pick_answerer(roster.manifest, sorted(roster.registry.model_ids))
+        model_id = pick_answerer(
+            roster.manifest,
+            sorted(roster.registry.model_ids),
+            prefer=roster.pins.get(Role.RESEARCH),
+        )
         if model_id is None:
             print("  no model available to answer")
             return
@@ -857,6 +909,7 @@ def cmd_start(args) -> int:
     args.live = chosen.live
     args.providers = ",".join(chosen.providers) if chosen.providers else "all"
     args.models = chosen.models
+    args.role_models = dict(chosen.role_models)
     args.review = chosen.review
     args.smoke = chosen.smoke
     args.smoke_install = chosen.smoke_install

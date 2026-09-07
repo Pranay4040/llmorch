@@ -42,6 +42,49 @@ LOOPBACK = ("127.0.0.1", "localhost", "::1")
 DEFAULT_PORT = 8788
 MAX_BODY = 64 * 1024
 
+# The role taxonomy is closed and internal — `profiles.json` keys a track record
+# on it, so the names cannot move. What can move is what they are called on a
+# page: "research" is not what anybody would call the thing that answers their
+# questions, and a person choosing a model for a job should be reading the job.
+ROLE_LABELS = {
+    "planning": (
+        "Planner",
+        "Splits your instruction into files and writes the contract the others "
+        "are held to. One request the whole run depends on.",
+    ),
+    "research": (
+        "Chat & questions",
+        "Answers `llmorch ask` and any question you type in a session. Never "
+        "writes a file.",
+    ),
+    "backend": (
+        "Backend",
+        "Servers, routes, database access.",
+    ),
+    "frontend": (
+        "Frontend",
+        "Pages and browser scripts.",
+    ),
+    "styling": (
+        "Styling",
+        "Stylesheets.",
+    ),
+    "content": (
+        "Docs & text",
+        "READMEs, sample data, prose.",
+    ),
+    "integration": (
+        "Glue & setup",
+        "Wiring, config, entry points.",
+    ),
+    "review": (
+        "Reviewer",
+        "Reads another model's file and says whether it does what was asked. "
+        "Always from a different vendor than the author — a pin that shares the "
+        "author's vendor is skipped for that file.",
+    ),
+}
+
 
 class ConfigureError(RuntimeError):
     pass
@@ -77,7 +120,17 @@ def snapshot() -> dict[str, Any]:
         for model in manifest.models
     ]
     roles = [
-        {"name": role.value, "models": list(chain)}
+        {
+            "name": role.value,
+            "label": ROLE_LABELS.get(role.value, (role.value, ""))[0],
+            "blurb": ROLE_LABELS.get(role.value, (role.value, ""))[1],
+            # The declared chain, for the "which models are meant for this job"
+            # ordering, and every model as the wider choice: a pin is a person
+            # overruling the manifest's preference, so the manifest's preference
+            # must not also be the limit of what they can pick.
+            "models": list(chain),
+            "pinned": current.role_models.get(role.value, ""),
+        }
         for role, chain in sorted(manifest.roles.items(), key=lambda kv: kv[0].value)
     ]
     return {

@@ -66,16 +66,21 @@ class Answer:
     one-line summary."""
 
 
-def pick_answerer(manifest: Manifest, candidates: list[str]) -> str | None:
+def pick_answerer(
+    manifest: Manifest, candidates: list[str], *, prefer: str | None = None
+) -> str | None:
     """Whoever is best at reading and explaining, and is still reachable.
 
     Keyed on the declared research affinity rather than a hardcoded name, for
     the same reason `pick_planner` is: adding a better model to the manifest
-    should be enough to change who answers.
+    should be enough to change who answers. A person's choice outranks the
+    affinity, and being unreachable outranks the choice.
     """
     eligible = [m for m in candidates if m in {x.id for x in manifest.enabled_models}]
     if not eligible:
         return None
+    if prefer and prefer in eligible:
+        return prefer
     return max(
         eligible,
         key=lambda m: (

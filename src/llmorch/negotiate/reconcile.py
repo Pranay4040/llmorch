@@ -45,6 +45,16 @@ class ReconcileInput:
     track_record: dict[tuple[str, Role], float] = field(default_factory=dict)
     quota_pressure: dict[str, float] = field(default_factory=dict)
     """model_id -> 0..1, how close the model is to its daily wall."""
+    pins: dict[Role, str] = field(default_factory=dict)
+    """role -> the model a person chose for it.
+
+    Applied by narrowing that node's options to the one model, which is also
+    what keeps the 2-opt pass from swapping it away again: a pinned node has no
+    second option to swap into.
+
+    It binds the *assignment* and nothing else. Failover still runs its full
+    ladder, because a pinned model that has tripped its circuit breaker is not
+    the model anybody meant to insist on."""
     imbalance_tolerance: float = 0.35
 
 
@@ -169,11 +179,32 @@ def reconcile(inp: ReconcileInput) -> ReconcileResult:
     scored: dict[str, list[tuple[float, str, ScoreBreakdown]]] = {}
     for node_id, node in inp.graph.nodes.items():
         options: list[tuple[float, str, ScoreBreakdown]] = []
+        pinned = inp.pins.get(node.role)
         for model_id in inp.candidates:
             if not is_feasible(inp.manifest, model_id, node):
                 continue
             breakdown = score_pair(inp, normalised, model_id, node)
             options.append((breakdown.total, model_id, breakdown))
+
+        if pinned:
+            # A pin that cannot serve this node falls back to the automatic
+            # choice *and says so*. Honouring it literally would degrade the
+            # node instead, which is a worse answer to "I prefer this model"
+            # than doing the work with a note attached.
+            kept = [o for o in options if o[1] == pinned]
+            if kept:
+                options = kept
+            elif pinned not in inp.candidates:
+                result.notes.append(
+                    f"{node.role.value} is pinned to {pinned}, which is not in "
+                    "this run's roster — assigned automatically"
+                )
+            else:
+                result.notes.append(
+                    f"{node.role.value} is pinned to {pinned}, which cannot serve "
+                    f"{node_id} (~{node.est_output_tokens} output tokens) — "
+                    "assigned automatically"
+                )
         if not options:
             result.unassigned.append(node_id)
             result.notes.append(

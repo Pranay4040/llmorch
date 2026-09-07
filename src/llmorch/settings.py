@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -70,6 +70,16 @@ class Settings:
     models: tuple[str, ...] = ()
     """Which models to use. Empty means every model the manifest enables."""
 
+    role_models: dict[str, str] = field(default_factory=dict)
+    """role name -> the model that should do that job. Absent means automatic.
+
+    A preference for the *assignment*, not a prohibition. Failover is untouched:
+    if the pinned model breaks mid-run its work still moves to another vendor,
+    because a model that has tripped its circuit breaker is not a model the
+    person meant to insist on. Pinning is how you say "this one is good at
+    this", and it is not a way to disable the ladder underneath it.
+    """
+
     review: str = "code"
     smoke: bool = False
     smoke_install: bool = False
@@ -90,6 +100,7 @@ class Settings:
             "live": self.live,
             "providers": list(self.providers),
             "models": list(self.models),
+            "role_models": dict(self.role_models),
             "review": self.review,
             "smoke": self.smoke,
             "smoke_install": self.smoke_install,
@@ -113,10 +124,11 @@ class Settings:
         """One line for the top of a session, so the mode is never a surprise."""
         mode = "live" if self.live else "mock (no network)"
         who = ", ".join(self.providers) if self.providers else "every keyed provider"
+        pinned = f", {len(self.role_models)} role(s) pinned" if self.role_models else ""
         extras = [name for name, on in (("smoke", self.smoke),
                                         ("smoke-install", self.smoke_install)) if on]
         tail = f", {' + '.join(extras)}" if extras else ""
-        return f"{mode} — {who}, review {self.review}{tail}"
+        return f"{mode} — {who}, review {self.review}{pinned}{tail}"
 
 
 def _clamp(value: Any, low: int, high: int, fallback: int) -> int:
@@ -140,6 +152,22 @@ def _names(value: Any) -> tuple[str, ...]:
     return tuple(dict.fromkeys(out))
 
 
+def _pairs(value: Any) -> dict[str, str]:
+    """A mapping of identifiers, from whatever the browser sent.
+
+    Both halves must be plain non-empty strings. An empty value means "no
+    opinion for this role" and is dropped rather than stored, so a cleared
+    dropdown leaves no residue for a later reader to interpret.
+    """
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, val in value.items():
+        if isinstance(key, str) and isinstance(val, str) and key.strip() and val.strip():
+            out[key.strip()] = val.strip()
+    return out
+
+
 def from_dict(raw: Any) -> Settings:
     """Build settings from untrusted JSON, keeping whatever is usable.
 
@@ -155,6 +183,7 @@ def from_dict(raw: Any) -> Settings:
         live=bool(raw.get("live", True)),
         providers=_names(raw.get("providers")),
         models=_names(raw.get("models")),
+        role_models=_pairs(raw.get("role_models")),
         review=review if review in REVIEW_MODES else "code",
         smoke=bool(raw.get("smoke", False)),
         smoke_install=bool(raw.get("smoke_install", False)),

@@ -22,7 +22,7 @@ from ..quota.estimator import TokenEstimator
 from ..quota.governor import Governor
 from ..quota.store import LedgerStore
 from ..registry.manifest import Manifest
-from ..types import Assignment, NodeResult, NodeState, Priority
+from ..types import Assignment, NodeResult, NodeState, Priority, Role
 from .blackboard import Blackboard
 from .checkpoint import Checkpoint, NodeSnapshot, new_checkpoint
 from .checkpoint import save as save_checkpoint
@@ -71,6 +71,7 @@ class Scheduler:
         ledger: LedgerStore | None = None,
         profiles: Profiles | None = None,
         checkpoints: bool = False,
+        pins: dict | None = None,
         progress: ProgressWriter | None = None,
         sleep=asyncio.sleep,
     ) -> None:
@@ -87,6 +88,8 @@ class Scheduler:
         self.ledger = ledger
         self.profiles = profiles or Profiles()
         self.checkpoints = checkpoints
+        self.pins = dict(pins or {})
+        """role -> model a person chose. Binds the assignment, never failover."""
         self.progress = progress
         """Live state for anything watching. Optional, and never load-bearing:
         every call to it is wrapped by the writer itself, because a run that
@@ -115,6 +118,7 @@ class Scheduler:
             bids=bids,
             track_record=self.profiles.as_track_record(),
             quota_pressure=self._quota_pressure(),
+            pins={role: m for role, m in self.pins.items() if m not in exclude},
             imbalance_tolerance=self.config.imbalance_tolerance,
         )
 
@@ -199,6 +203,10 @@ class Scheduler:
             blackboard=self.blackboard,
             max_retries=self.config.max_retries,
             review=self.config.review,
+            # The review pin travels separately from the assignment pins: a
+            # reviewer is chosen per node at execution time, against the author,
+            # not laid out in advance by the reconciler.
+            review_model=self.pins.get(Role.REVIEW, ""),
             sleep=self.sleep,
             ledger=self.ledger,
             run_id=self.config.run_id,

@@ -133,6 +133,15 @@ the flags are chosen once rather than restated every time. The command line stil
 overrides them (`llmorch start --mock`), because a stored preference should never
 be the reason you cannot do something once.
 
+Its **Who does what** tab is where you say which model does which job —
+planner, chat and questions, backend, frontend, styling, docs, glue, reviewer.
+Anything left on *Automatic* is assigned the way it always was: by fitness,
+remaining quota and an even split, which is usually better than a person's
+guess. A pin binds the *assignment* and nothing else — failover still runs its
+whole ladder, because a model that has tripped its circuit breaker is not the
+one you meant to insist on, and a pinned reviewer that shares the author's
+vendor is skipped for that file rather than allowed to review its own family.
+
 That page is the only part of the system that accepts a write, so unlike the
 read-only dashboard it carries a token minted at launch and included in the URL
 it opens, refuses a non-loopback `Host`, and will only write the key variables

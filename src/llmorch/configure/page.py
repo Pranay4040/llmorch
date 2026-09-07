@@ -89,6 +89,21 @@ PAGE = """<!doctype html>
     background: var(--bg); border: 1px solid var(--line); border-radius: 4px;
     padding: 1px 6px;
   }
+  nav.tabs { display: flex; gap: 4px; margin: 0 0 18px; border-bottom: 1px solid var(--line); }
+  nav.tabs button {
+    background: transparent; color: var(--muted); border: 0; border-bottom: 2px solid transparent;
+    border-radius: 0; padding: 9px 16px; font: inherit; cursor: pointer;
+  }
+  nav.tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+  nav.tabs .count {
+    font-size: 11px; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 999px; padding: 0 6px; margin-left: 7px;
+  }
+  .role { display: grid; grid-template-columns: 210px 1fr; gap: 14px;
+          align-items: start; padding: 12px 0; border-top: 1px solid var(--line); }
+  .role:first-of-type { border-top: 0; }
+  .role .blurb { color: var(--muted); font-size: 13px; margin-top: 3px; }
+  .role select { max-width: 320px; }
   .warn { color: var(--warn); }
   .bad { color: var(--bad); }
 </style>
@@ -98,7 +113,9 @@ PAGE = """<!doctype html>
   <h1>llmorch setup</h1>
   <p class="lede">Choose once. Then run <code>llmorch start</code> and talk to it.</p>
 
-  <section>
+  <nav class="tabs" id="tabs" role="tablist"></nav>
+
+  <section data-tab="keys">
     <h2>Keys</h2>
     <p class="hint">
       Written to <span id="envpath" class="muted"></span>, which is gitignored.
@@ -109,7 +126,7 @@ PAGE = """<!doctype html>
     <div style="margin-top:14px"><button id="savekeys" class="ghost">Save keys</button></div>
   </section>
 
-  <section>
+  <section data-tab="models">
     <h2>Models</h2>
     <p class="hint">
       Which models this account may use. Unticking every model of a vendor
@@ -119,7 +136,23 @@ PAGE = """<!doctype html>
     <p id="unstaffed" class="hint warn"></p>
   </section>
 
-  <section>
+  <section data-tab="roles">
+    <h2>Who does what</h2>
+    <p class="hint">
+      One model per job, when you want to choose. <em>Automatic</em> lets the
+      assignment pick by fitness, remaining quota and an even split — which is
+      usually better, and is what every unpinned job does.
+    </p>
+    <p class="hint">
+      A pin binds the <em>assignment</em>, not failover. If the model you chose
+      breaks mid-run its work still moves to another vendor, because a model
+      that has tripped its circuit breaker is not the one you meant to insist on.
+    </p>
+    <div id="roles"></div>
+    <p id="rolewarn" class="hint warn"></p>
+  </section>
+
+  <section data-tab="runs">
     <h2>How runs behave</h2>
     <div class="opts">
       <label class="check"><input type="checkbox" id="live"> call real providers</label>
@@ -212,7 +245,7 @@ function drawModels() {
       box.value = model.id;
       box.checked = all || chosen.has(model.id);
       box.dataset.model = "1";
-      box.addEventListener("change", drawUnstaffed);
+      box.addEventListener("change", () => { drawUnstaffed(); drawRoles(); });
       label.append(box);
       label.append(el("span", null, model.id));
       label.append(el("span", "muted", "  " + model.context.toLocaleString() + " ctx"));
@@ -258,12 +291,118 @@ document.getElementById("live").addEventListener("change", () => {
   drawSettings();
 });
 
+const TABS = [
+  {id: "keys", label: "Keys"},
+  {id: "models", label: "Models"},
+  {id: "roles", label: "Who does what"},
+  {id: "runs", label: "Runs"},
+];
+let active = location.hash.replace("#", "") || "keys";
+
+function showTab(id) {
+  active = id;
+  history.replaceState(null, "", "#" + id);
+  for (const section of document.querySelectorAll("section[data-tab]")) {
+    section.hidden = section.dataset.tab !== id;
+  }
+  for (const button of document.querySelectorAll("nav.tabs button")) {
+    button.setAttribute("aria-selected", String(button.dataset.tab === id));
+  }
+}
+
+function drawTabs() {
+  const nav = document.getElementById("tabs");
+  nav.replaceChildren();
+  for (const tab of TABS) {
+    const button = el("button", null, tab.label);
+    button.dataset.tab = tab.id;
+    button.setAttribute("role", "tab");
+    if (tab.id === "roles" && config) {
+      const pinned = config.roles.filter(r => r.pinned).length;
+      if (pinned) button.append(el("span", "count", String(pinned)));
+    }
+    button.addEventListener("click", () => showTab(tab.id));
+    nav.append(button);
+  }
+  showTab(active);
+}
+
+function drawRoles() {
+  const host = document.getElementById("roles");
+  host.replaceChildren();
+  const available = new Set(chosenModels());
+
+  for (const role of config.roles) {
+    const row = el("div", "role");
+    const left = el("div");
+    left.append(el("div", "name", role.label));
+    left.append(el("div", "blurb", role.blurb));
+    row.append(left);
+
+    const picker = el("select");
+    picker.dataset.role = role.name;
+    picker.append(new Option("Automatic — best fit, fair share", ""));
+
+    // The models the manifest lists for this job first, then everything else:
+    // a pin is a person overruling that preference, so it must not also be the
+    // limit of what they can pick.
+    const suggested = role.models.filter(id => available.has(id));
+    const rest = config.models.map(m => m.id)
+      .filter(id => available.has(id) && !suggested.includes(id));
+
+    for (const [group, ids] of [["suited to this job", suggested], ["others", rest]]) {
+      if (!ids.length) continue;
+      const box = document.createElement("optgroup");
+      box.label = group;
+      for (const id of ids) box.append(new Option(id, id));
+      picker.append(box);
+    }
+
+    picker.value = available.has(role.pinned) ? role.pinned : "";
+    picker.addEventListener("change", drawRoleWarning);
+    row.append(picker);
+    host.append(row);
+  }
+  drawRoleWarning();
+}
+
+function chosenRoles() {
+  const out = {};
+  for (const picker of document.querySelectorAll("[data-role]")) {
+    if (picker.value) out[picker.dataset.role] = picker.value;
+  }
+  return out;
+}
+
+function drawRoleWarning() {
+  const pins = chosenRoles();
+  const notes = [];
+
+  // Every author is a candidate reviewer's author. If the only thing left that
+  // could review is the vendor doing the writing, review is skipped per file
+  // rather than done badly — worth saying before the run rather than after.
+  const vendorOf = (id) => (config.models.find(m => m.id === id) || {}).provider;
+  if (pins.review) {
+    const writers = Object.entries(pins)
+      .filter(([role]) => role !== "review")
+      .map(([, id]) => vendorOf(id));
+    if (writers.length && writers.every(v => v === vendorOf(pins.review))) {
+      notes.push("every pinned writer shares the reviewer's vendor, so review "
+                 + "will be skipped for those files — a reviewer never shares "
+                 + "the author's vendor.");
+    }
+  }
+  document.getElementById("rolewarn").textContent = notes.join(" ");
+}
+
 async function load() {
   try {
     config = await call("/api/config");
     drawProviders();
     drawModels();
+    drawRoles();
     drawSettings();
+    drawTabs();
     status(config.settings.configured ? "loaded" : "not configured yet");
   } catch (err) {
     status("could not load: " + err.message, "bad");
@@ -305,6 +444,7 @@ document.getElementById("save").addEventListener("click", async () => {
     // Every model ticked means "no opinion", which keeps working when a model
     // is added to the manifest later.
     models: picked.length === every ? [] : picked,
+    role_models: chosenRoles(),
     providers: [],
   };
   status("saving…");

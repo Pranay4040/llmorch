@@ -1,6 +1,6 @@
 # llmorch — handoff
 
-**State:** M0–M6 done, plus the smoke run, the question lane, the setup page and live run tracking. 689 tests pass,
+**State:** M0–M6 done, plus the smoke run, the question lane, the setup page, live run tracking and per-job model choice. 706 tests pass,
 1 skipped on Windows (a symlink test needing admin). Published at
 github.com/Pranay4040/llmorch, tagged `v0.1.0`.
 
@@ -18,7 +18,7 @@ Two things in one repo:
 ## Run it
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q                  # 689 tests, no network
+.venv/Scripts/python.exe -m pytest -q                  # 706 tests, no network
 .venv/Scripts/python.exe -m llmorch run "build a notes app"        # mock, offline
 .venv/Scripts/python.exe -m llmorch run --smoke "<task>"          # ...then run the result
 .venv/Scripts/python.exe -m llmorch run --smoke-install "<task>"  # ...installing its deps first
@@ -109,6 +109,22 @@ Ordered by value. Issues #1–#4 are filed on GitHub.
 
 Each was learned by getting it wrong against a live API.
 
+- **A pin binds the assignment and nothing else.** Choosing a model for a job
+  overrides the reconciler's choice for that role and leaves every other
+  mechanism intact: failover still runs its whole ladder, since a model that has
+  tripped its circuit breaker is not the one anybody meant to insist on, and
+  `pick_reviewer` filters a review pin through the cross-vendor rule rather than
+  letting it outrank it. Enforced structurally — a pinned node is scored against
+  one model, so the 2-opt swap pass has nothing to trade it into.
+- **A pin that cannot be honoured falls back out loud.** Not in the roster, or
+  too small an output ceiling for the node: the automatic choice takes over and
+  the run says which pin it could not use. Degrading a node to honour a
+  preference literally is a worse answer to "I prefer this model" than doing the
+  work with a note attached.
+- **Every chooser reads the pins, not just the reconciler.** Three jobs are
+  never carried by a node — the planner, the answerer and the reviewer — and
+  wiring only the reconciler left the two most visible ones (chat and planning)
+  silently unpinnable. Found by pinning them and watching the affinity win.
 - **A run's numbers belong in the browser, because they move.** The terminal
   printed five tables describing the state everything was in when the run
   ended. A run now publishes `runs/<id>/progress.json` as it goes — the same
