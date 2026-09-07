@@ -152,6 +152,94 @@ class Manifest(BaseModel):
     def enabled_models(self) -> tuple[ModelSpec, ...]:
         return tuple(m for m in self.models if self.providers[m.provider].enabled)
 
+    def restricted_to(self, providers: set[str] | None) -> Manifest:
+        """The same manifest with every provider outside `providers` switched off.
+
+        `--providers groq` has to narrow the *roster*, not just the client
+        registry. Narrowing only the registry leaves the assignment free to hand
+        a node to a model nothing can call, and the run then dies looking for a
+        provider that was never built — after the plan has been printed, which
+        is the most expensive moment in a run to fail at, because the planning
+        request is already spent by then.
+
+        Switching a provider off is a state the manifest is already valid in:
+        `_validate` deliberately checks the *declared* chain rather than the
+        enabled subset, so a disabled vendor is legal and the cross-vendor rule
+        still describes the file rather than the run.
+        """
+        if not providers:
+            return self
+        unknown = sorted(providers - set(self.providers))
+        if unknown:
+            raise ManifestError(
+                f"unknown provider(s) {', '.join(unknown)}; the manifest declares "
+                f"{', '.join(sorted(self.providers))}"
+            )
+        narrowed = {
+            name: spec if name in providers else spec.model_copy(update={"enabled": False})
+            for name, spec in self.providers.items()
+        }
+        return self.model_copy(update={"providers": narrowed})
+
+    def restricted_to_models(self, model_ids: set[str] | None) -> Manifest:
+        """The same manifest holding only the named models.
+
+        The companion to `restricted_to`, one level down: a provider is a group
+        of models, and choosing *which* models is the finer control the config
+        page offers. Three things move together, and all three have to, or the
+        roster and the run disagree again:
+
+        - `models`, so nothing else can look one up;
+        - every role chain, because a chain naming a dropped model would raise
+          the moment failover reached it;
+        - the providers left with nothing, switched off so `enabled_models`
+          and the client registry still describe the same run.
+        """
+        if not model_ids:
+            return self
+        unknown = sorted(model_ids - {m.id for m in self.models})
+        if unknown:
+            raise ManifestError(
+                f"unknown model(s) {', '.join(unknown)}; the manifest declares "
+                f"{', '.join(sorted(m.id for m in self.models))}"
+            )
+        models = tuple(m for m in self.models if m.id in model_ids)
+        roles = {
+            role: tuple(i for i in chain if i in model_ids)
+            for role, chain in self.roles.items()
+        }
+        alive = {m.provider for m in models}
+        providers = {
+            name: spec if name in alive else spec.model_copy(update={"enabled": False})
+            for name, spec in self.providers.items()
+        }
+        return self.model_copy(
+            update={"models": models, "roles": roles, "providers": providers}
+        )
+
+    def unstaffed_roles(self) -> tuple[Role, ...]:
+        """Roles with no enabled model left to serve them.
+
+        Not an error here — the manifest on disk is still valid, and this is a
+        property of one run's selection — but a node with this role has nobody
+        to fail over to and nobody to start with, so the caller says so before
+        spending the planning request that discovers it.
+        """
+        return tuple(role for role in self.roles if not self.chain(role))
+
+    def single_vendor_roles(self) -> tuple[Role, ...]:
+        """Roles whose enabled chain cannot fail over to a second vendor.
+
+        Never an error — `--providers groq` asks for exactly this — but worth
+        saying out loud, since failure modes correlate within a vendor and a
+        run in this state has no ladder left under it.
+        """
+        return tuple(
+            role
+            for role in self.roles
+            if len({self.vendor_of(m) for m in self.chain(role)}) < 2
+        )
+
     def chain(self, role: Role, *, enabled_only: bool = True) -> tuple[str, ...]:
         """Fallback chain for a role, preference-ordered."""
         ids = self.roles.get(role, ())

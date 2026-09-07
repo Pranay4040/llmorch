@@ -90,6 +90,15 @@ CANNED_REVISION = json.dumps(
     }
 )
 
+# The answer to an `[answer]` request. Prose rather than JSON, because that is
+# what a question returns: the offline path has to exercise a reply that is
+# printed to a person, not parsed.
+CANNED_ANSWER = (
+    "The project serves its pages from a stdlib HTTP server and keeps items in "
+    "SQLite. This is the mock provider answering offline, so it is describing "
+    "the canned project rather than reading yours."
+)
+
 CANNED_BIDS = json.dumps(
     {
         "bids": [
@@ -156,6 +165,8 @@ class MockProvider:
     whole run hangs on — so it has to be exercisable with no network."""
     bid_response: str = CANNED_BIDS
     """Answer to a `[bid]` request."""
+    answer_response: str = CANNED_ANSWER
+    """Reply to an `[answer]` request — a question about the project."""
     needs_tokens: dict[str, int] = field(default_factory=dict)
     """node_id -> output tokens the artifact genuinely requires.
 
@@ -215,6 +226,8 @@ class MockProvider:
             return self._respond(request, self.revise_response)
         if negotiating == "bid":
             return self._respond(request, self.bid_response)
+        if negotiating == "answer":
+            return self._respond(request, self.answer_response)
         if reviewing:
             return self._respond(
                 request, self.review_responses.get(node_id, self.default_review)
@@ -296,6 +309,8 @@ def _negotiation_marker(request: ChatRequest) -> str | None:
                 return "revise"
             if stripped == "[bid]":
                 return "bid"
+            if stripped == "[answer]":
+                return "answer"
     return None
 
 

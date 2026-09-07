@@ -333,11 +333,16 @@ def test_a_first_turn_builds_and_a_second_can_change_nothing(
     tmp_path, monkeypatch, capsys
 ):
     """The whole loop offline: build, then an instruction the planner answers
-    with no nodes at all — which is an answer, not a failure."""
+    with no nodes at all — which is an answer, not a failure.
+
+    The second line has to be an instruction for this to be the case under test.
+    "looks good" no longer reaches the planner at all; that it does not is
+    `test_ask.py`'s subject.
+    """
     from llmorch import __main__ as cli
 
     _offline(monkeypatch, tmp_path, revise_response='{"nodes": []}')
-    _script(monkeypatch, "build a notes app", "looks good", "/quit")
+    _script(monkeypatch, "build a notes app", "tidy up the spacing", "/quit")
 
     args = cli.build_parser().parse_args(["chat"])
     assert args.func(args) == 0
@@ -349,7 +354,7 @@ def test_a_first_turn_builds_and_a_second_can_change_nothing(
     conversation = Conversation.load(session_id)
     assert [t.instruction for t in conversation.turns] == [
         "build a notes app",
-        "looks good",
+        "tidy up the spacing",
     ]
     assert conversation.turns[-1].planned == ()
     assert len(conversation.files) == 6
@@ -400,15 +405,23 @@ def _one_node_change() -> str:
 # ==========================================================================
 
 
-def test_a_bare_invocation_opens_a_session(tmp_path, monkeypatch, capsys):
-    """`llmorch` on its own used to be an argparse error."""
+def test_a_bare_invocation_opens_the_setup_page(tmp_path, monkeypatch):
+    """`llmorch` on its own was an argparse error, then a session, and is now
+    the setup page — the one decision that has to be made before a session means
+    anything, and the one whose default failure is silent."""
     from llmorch import __main__ as cli
+
+    opened: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli, "configure_serve", lambda **kw: opened.update(kw)
+    )
+
+    assert cli.main([]) == 0
+    assert opened  # the page, not a session
 
     _offline(monkeypatch, tmp_path, revise_response='{"nodes": []}')
     _script(monkeypatch, "/quit")
-
-    assert cli.main([]) == 0
-    assert "New session" in capsys.readouterr().out
+    assert cli.main(["chat"]) == 0
 
 
 def test_an_opening_instruction_is_said_for_you(tmp_path, monkeypatch, capsys):

@@ -113,15 +113,31 @@ vendors, assigns each slice by fitness and remaining quota, and writes a
 runnable project folder:
 
 ```bash
-llmorch                                          # a session; the shortest way in
+llmorch                                          # the setup page, in a browser
+llmorch start                                    # a session, using what it saved
 ./llmorch                                        # ...from a checkout, no PATH needed
 llmorch "build a notes app"                      # ...with the first thing said
 llmorch run "build a notes app"                  # mock provider, no network
 llmorch run --live --providers all "build a CLI that converts CSV to markdown"
 llmorch run --smoke "build a notes app"          # ...and then run what it wrote
 llmorch chat                                     # a session, not one shot
+llmorch ask "what serves /api/items?"            # a question about what it built
 llmorch resume <run_id>                          # after a quota wall
 ```
+
+**Set it up in a browser, then talk to it in a terminal.** `llmorch` on its own
+opens a local page: paste your keys, tick which models this account may use, and
+choose whether runs are live, reviewed, and started after they are built. It
+saves to `settings.json` beside the ledger, and `llmorch start` runs on that — so
+the flags are chosen once rather than restated every time. The command line still
+overrides them (`llmorch start --mock`), because a stored preference should never
+be the reason you cannot do something once.
+
+That page is the only part of the system that accepts a write, so unlike the
+read-only dashboard it carries a token minted at launch and included in the URL
+it opens, refuses a non-loopback `Host`, and will only write the key variables
+the manifest actually declares. Keys go one way: it can tell you a key is set and
+has no endpoint that gives one back.
 
 `chat` keeps the conversation: the first instruction builds a project, and each
 one after it is planned as a *change* to what already exists, so "now add tags"
@@ -131,6 +147,21 @@ file — never the file contents, because a conversation that pasted its artifac
 back into the planner would grow every prompt with the project instead of with
 the request. Sessions are saved after every turn; `--continue` picks the last one
 back up.
+
+**Not every line is an instruction.** "what does the server do?" is a question
+and "looks good" is neither, and a session that planned both spent a request to
+be told there was nothing to plan. Which lane a line belongs in is a property of
+the line, so it is decided before anything is spent: a question is answered from
+what the session already knows, an acknowledgement costs nothing at all, and
+anything the classifier does not recognise is an instruction — the old behaviour,
+which is what makes it safe for the rules to stay small. `/ask` and `/build`
+settle the residue by naming the lane outright.
+
+An answer is one request and writes nothing. It is grounded in the same memory a
+plan is made against — the instructions, the contract, one summary per file, and
+who wrote it — plus the contents of any file the question *names*, so the prompt
+still grows with the request rather than with the project. `llmorch ask` reaches
+the same lane from a shell prompt, without opening a session.
 
 `--smoke` starts the generated project, drives the contract's pages and routes
 against it over HTTP, and reports what came back. How to start it is part of the
@@ -175,6 +206,11 @@ evidence about them should not be the one part that lives in scrollback.
 Supporting commands: `doctor --probe` (verify wire names before depending on
 them), `discover` (ask a key which models it can reach, spending no tokens),
 `quota`, `ledger`, `dashboard` (read-only, loopback only).
+
+`--providers` narrows the roster itself, not just the client registry: a model
+left enabled that nothing can reach is a node assigned to nobody. The same
+narrowing covers a provider that is enabled in `models.yaml` with no key in the
+environment, which is the identical fault through a quieter door.
 
 Current state, what is next, and the invariants not to break are in
 [HANDOFF.md](HANDOFF.md). The original 45k plan is in

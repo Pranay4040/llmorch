@@ -2,6 +2,9 @@
 
     llmorch run "build a notes app"          # mock provider, no network
     llmorch run --live "build a notes app"   # real requests, Groq only [M2]
+    llmorch                                  # the setup page, in a browser
+    llmorch start                            # a session, using what it saved
+    llmorch ask "what serves /api/items?"    # a question, not an instruction
     llmorch resume [<run_id>]                # continue after a quota wall
     llmorch plan --explain "build a notes app"
     llmorch quota
@@ -14,12 +17,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from . import settings as settings_module
 from .config import RunConfig, load_dotenv, runs_dir, state_db_path
+from .configure.server import DEFAULT_PORT as CONFIGURE_PORT
+from .configure.server import serve as configure_serve
 from .dashboard.server import DEFAULT_PORT, serve
 from .demo.website import ARTIFACTS, INTERFACE, SUMMARIES, TASK, build_nodes
 from .discover import discover_all
@@ -48,6 +55,12 @@ from .providers.openai_compat import build_live_registry
 from .quota.estimator import TokenEstimator
 from .negotiate import plancache
 from .negotiate.bidding import collect_bids, should_bid
+from .negotiate.answer import (
+    answer,
+    files_named,
+    pick_answerer,
+    take_excerpts,
+)
 from .negotiate.decompose import (
     DecomposeError,
     decompose,
@@ -55,6 +68,7 @@ from .negotiate.decompose import (
     plan_signature,
     revise,
 )
+from .negotiate.intent import Intent, classify
 from .negotiate.profiles import Profiles
 from .quota.governor import Governor
 from .quota.store import DayUsage, LedgerStore, restore_governor
@@ -92,19 +106,24 @@ def _providers_arg(value: str | None) -> set[str] | None:
 
 
 @dataclass(slots=True)
-class Session:
-    """Everything a command needs, assembled once."""
+class Roster:
+    """Who can be called, under what accounting — assembled without a plan.
+
+    Split out from `Session` because a question is not a build. Answering one
+    needs the models, the governor and the ledger and nothing else; planning it
+    would spend the request that asking a question exists to avoid.
+    """
 
     manifest: Manifest
     config: RunConfig
-    graph: TaskGraph
     governor: Governor
-    scheduler: Scheduler
-    store: LedgerStore | None
+    registry: ProviderRegistry
     estimator: TokenEstimator
+    store: LedgerStore | None
     restored: dict[str, DayUsage]
     mock: MockProvider | None
     profiles: Profiles
+    warnings: list[str] = field(default_factory=list)
 
     def close(self) -> None:
         # The track record is the only thing here that took live requests to
@@ -117,6 +136,52 @@ class Session:
             # away at process exit.
             self.store.save_calibration(self.estimator.to_dict())
             self.store.close()
+
+
+@dataclass(slots=True)
+class Session:
+    """A roster with a plan on top: everything a build needs."""
+
+    roster: Roster
+    graph: TaskGraph
+    scheduler: Scheduler
+
+    # The roster's parts are reached through the session, so a command that
+    # holds one does not have to know which of the two assembled what.
+    @property
+    def manifest(self) -> Manifest:
+        return self.roster.manifest
+
+    @property
+    def config(self) -> RunConfig:
+        return self.roster.config
+
+    @property
+    def governor(self) -> Governor:
+        return self.roster.governor
+
+    @property
+    def store(self) -> LedgerStore | None:
+        return self.roster.store
+
+    @property
+    def estimator(self) -> TokenEstimator:
+        return self.roster.estimator
+
+    @property
+    def restored(self) -> dict[str, DayUsage]:
+        return self.roster.restored
+
+    @property
+    def mock(self) -> MockProvider | None:
+        return self.roster.mock
+
+    @property
+    def profiles(self) -> Profiles:
+        return self.roster.profiles
+
+    def close(self) -> None:
+        self.roster.close()
 
 
 def _mock_registry(manifest) -> tuple[ProviderRegistry, MockProvider]:
@@ -243,9 +308,12 @@ def _plan(
     )
 
 
-def _setup(
-    args, *, run_id: str | None = None, stored_plan: dict | None = None
-) -> Session:
+def _roster(args, *, run_id: str | None = None) -> Roster:
+    """Assemble who can be called and how their usage is accounted for.
+
+    No planning happens here: this is everything a single request needs, which
+    is all a question needs.
+    """
     manifest = load_manifest()
     config = RunConfig(
         task=args.task or TASK,
@@ -260,12 +328,33 @@ def _setup(
         max_concurrency=getattr(args, "concurrency", 4),
     )
 
-    governor = Governor(
-        manifest,
-        max_usd=config.max_usd,
-        allow_paid=config.allow_paid,
-        safety_factor=config.token_safety_factor,
-    )
+    warnings: list[str] = []
+    only = _providers_arg(getattr(args, "providers", None))
+
+    # Which models the setup page left ticked. Applied in both modes, so a mock
+    # run rehearses the roster a live one would use.
+    #
+    # Unknown ids are dropped rather than fatal: this list is a file written
+    # when `models.yaml` said something else, and a model retired from the
+    # manifest must not be the reason a session refuses to start.
+    wanted = {m for m in getattr(args, "models", ()) or ()}
+    if wanted:
+        known = {m.id for m in manifest.models}
+        stale = sorted(wanted - known)
+        if stale:
+            warnings.append(
+                f"settings name {', '.join(stale)}, which the manifest no longer "
+                "declares — ignored"
+            )
+        wanted &= known
+    if wanted:
+        manifest = manifest.restricted_to_models(wanted)
+        empty = manifest.unstaffed_roles()
+        if empty:
+            warnings.append(
+                f"no model left to serve {', '.join(sorted(r.value for r in empty))} "
+                "— a node with that role cannot run"
+            )
 
     # A dry run touches neither the ledger nor the network. Recording mock
     # calls would tell tomorrow's admission control that quota was spent which
@@ -281,11 +370,70 @@ def _setup(
     else:
         store = LedgerStore(state_db_path()).open()
         estimator = TokenEstimator.from_dict(store.load_calibration())
-        restored = restore_governor(governor, store, manifest)
-        registry, _ = build_live_registry(
-            manifest,
-            only_providers=_providers_arg(getattr(args, "providers", None)),
+
+        # The roster is narrowed to what can actually be called, *before*
+        # anything is built on it. The assignment, the failover chains and the
+        # governor all read the manifest, and a model left enabled there that no
+        # client serves is a node assigned to nobody: the run fails looking for
+        # a provider that was never built, after the plan has been printed and
+        # the planning request already spent.
+        #
+        # Two ways a model gets left behind, and they are the same fault: named
+        # out by `--providers`, or enabled in the manifest with no key in the
+        # environment. `restricted_to` is what makes the roster agree with the
+        # registry in both cases.
+        if only:
+            manifest = manifest.restricted_to(only)  # also rejects an unknown name
+        registry, _ = build_live_registry(manifest, only_providers=only)
+
+        reachable = {manifest.vendor_of(m) for m in registry.model_ids}
+        keyless = sorted(
+            {m.provider for m in manifest.enabled_models} - reachable
         )
+        if keyless:
+            warnings.append(
+                f"no key for {', '.join(keyless)} — left out of this run's roster"
+            )
+        manifest = manifest.restricted_to(reachable)
+
+        stranded = manifest.single_vendor_roles()
+        if stranded:
+            warnings.append(
+                f"{', '.join(sorted(r.value for r in stranded))} can only be served "
+                f"by {', '.join(sorted(reachable))} in this run — a failure there "
+                "has nowhere to fail over to"
+            )
+
+    governor = Governor(
+        manifest,
+        max_usd=config.max_usd,
+        allow_paid=config.allow_paid,
+        safety_factor=config.token_safety_factor,
+    )
+    if store is not None:
+        restored = restore_governor(governor, store, manifest)
+
+    return Roster(
+        manifest=manifest,
+        config=config,
+        governor=governor,
+        registry=registry,
+        estimator=estimator,
+        store=store,
+        restored=restored,
+        mock=mock,
+        profiles=profiles,
+        warnings=warnings,
+    )
+
+
+def _setup(
+    args, *, run_id: str | None = None, stored_plan: dict | None = None
+) -> Session:
+    roster = _roster(args, run_id=run_id)
+    manifest, config = roster.manifest, roster.config
+    governor, registry = roster.governor, roster.registry
+    estimator, store, profiles = roster.estimator, roster.store, roster.profiles
 
     nodes, interface, plan_note = _plan(
         args,
@@ -300,6 +448,7 @@ def _setup(
     )
     graph = TaskGraph.build(nodes)
     graph.prune_to_budget(config.max_nodes)
+    graph.warnings.extend(roster.warnings)
     if plan_note:
         graph.warnings.append(plan_note)
 
@@ -315,18 +464,7 @@ def _setup(
         profiles=profiles,
         checkpoints=True,
     )
-    return Session(
-        manifest=manifest,
-        config=config,
-        graph=graph,
-        governor=governor,
-        scheduler=scheduler,
-        store=store,
-        estimator=estimator,
-        restored=restored,
-        mock=mock,
-        profiles=profiles,
-    )
+    return Session(roster=roster, graph=graph, scheduler=scheduler)
 
 
 # --------------------------------------------------------------------------
@@ -453,11 +591,17 @@ def cmd_resume(args) -> int:
 
 
 CHAT_HELP = """\
+  <a question>      answered from what this session knows; nothing is built
   <anything else>   an instruction: the first builds, the rest change what is built
+  /ask <question>   answer it, whatever it looks like
+  /build <thing>    build it, whatever it looks like
   /files            what the project consists of now
   /history          what you have asked so far
   /report           where this session's report.md is
   /quit             leave (the conversation is saved after every turn)
+
+  A line ending in "?" is a question; "add tags" is an instruction; "thanks" is
+  neither and costs nothing. /ask and /build settle it when the guess is wrong.
 """
 
 
@@ -516,7 +660,8 @@ def _chat_command(line: str, history: Conversation, config_dir: Path) -> bool:
     elif command == "/history":
         for index, turn in enumerate(history.turns, start=1):
             degraded = f"  ({len(turn.degraded)} degraded)" if turn.degraded else ""
-            print(f"  {index}. {turn.instruction}{degraded}")
+            mark = {"ask": "?", "remark": "·"}.get(turn.kind, " ")
+            print(f"  {index}. {mark} {turn.instruction}{degraded}")
     elif command == "/report":
         print(f"  {config_dir / REPORT_NAME}")
     else:
@@ -524,8 +669,89 @@ def _chat_command(line: str, history: Conversation, config_dir: Path) -> bool:
     return True
 
 
-def _chat_turn(args, history: Conversation, run_dir: Path, line: str) -> None:
-    """One instruction, planned and carried out against what already exists."""
+def _answer_question(
+    args, history: Conversation, run_dir: Path, question: str
+) -> None:
+    """One question, answered against what this session already knows.
+
+    No graph, no plan, no files. The whole point of the lane is that a question
+    costs one request and leaves the project exactly as it was.
+    """
+    roster = _roster(args, run_id=history.session_id)
+    try:
+        model_id = pick_answerer(roster.manifest, sorted(roster.registry.model_ids))
+        if model_id is None:
+            print("  no model available to answer")
+            return
+
+        # Only what the question named. A question that names no file is
+        # answered from summaries, which is what the session remembers anyway.
+        on_disk = _read_output(run_dir / "output")
+        named = files_named(question, sorted(on_disk))
+        excerpts = take_excerpts(on_disk, named)
+
+        deps = _worker_deps(
+            manifest=roster.manifest,
+            governor=roster.governor,
+            registry=roster.registry,
+            estimator=roster.estimator,
+            profiles=roster.profiles,
+            store=roster.store,
+            config=roster.config,
+            interface=history.interface,
+        )
+        reply = asyncio.run(
+            answer(
+                question,
+                deps=deps,
+                model_id=model_id,
+                memory=history.render_for_answer(),
+                interface_text=Blackboard(interface=history.interface).interface_text(),
+                excerpts=excerpts,
+                exchanges=history.render_exchanges(),
+            )
+        )
+    except LLMOrchError as exc:
+        print(f"  {exc}")
+        return
+    finally:
+        roster.close()
+
+    for line in reply.text.splitlines():
+        print(f"  {line}" if line.strip() else "")
+    read = f", reading {', '.join(reply.files_read)}" if reply.files_read else ""
+    print(f"  — {reply.model_id}{read}\n")
+
+    history.record_said(question, kind="ask", answer=reply.text)
+    history.save()
+
+
+def _chat_turn(
+    args,
+    history: Conversation,
+    run_dir: Path,
+    line: str,
+    *,
+    intent: Intent | None = None,
+) -> None:
+    """One line of the conversation, in whichever lane it belongs to.
+
+    The classification is free and happens before anything is spent, which is
+    the entire point: "looks good" used to buy a planning request in order to be
+    told there was nothing to plan.
+    """
+    lane = intent or classify(line)
+
+    if lane is Intent.REMARK:
+        print("  noted — nothing to build\n")
+        history.record_said(line, kind="remark")
+        history.save()
+        return
+
+    if lane is Intent.ASK:
+        _answer_question(args, history, run_dir, line)
+        return
+
     args.task = line
     args.history = history
     prior = _read_output(run_dir / "output")
@@ -583,6 +809,17 @@ def cmd_chat(args) -> int:
         if not line:
             continue
         if line.startswith("/"):
+            # `/ask` and `/build` are not queries about the session, they are
+            # turns with the lane named outright — which is what lets the
+            # classifier stay small instead of growing a case per phrasing.
+            verb, _, rest = line.partition(" ")
+            forced = {"/ask": Intent.ASK, "/build": Intent.BUILD}.get(verb.lower())
+            if forced is not None:
+                if rest.strip():
+                    _chat_turn(args, history, run_dir, rest.strip(), intent=forced)
+                else:
+                    print(f"  {verb} needs something after it")
+                continue
             if not _chat_command(line, history, run_dir):
                 break
             continue
@@ -590,6 +827,65 @@ def cmd_chat(args) -> int:
         _chat_turn(args, history, run_dir, line)
 
     print(f"Session {history.session_id} saved to {history.path}")
+    return 0
+
+
+def cmd_configure(args) -> int:
+    """Open the setup page and stay up until it is closed."""
+    configure_serve(
+        port=getattr(args, "port", CONFIGURE_PORT),
+        open_browser=not getattr(args, "no_browser", False),
+    )
+    return 0
+
+
+def cmd_start(args) -> int:
+    """A session using what the setup page saved.
+
+    The file supplies the defaults and the command line still wins, because a
+    stored preference should never be the reason you cannot do something once.
+    """
+    chosen, complaint = settings_module.read()
+    if complaint:
+        print(f"warning: {complaint}")
+    if getattr(args, "mock", False):
+        chosen = dataclasses.replace(chosen, live=False)
+    elif getattr(args, "live", False):
+        chosen = dataclasses.replace(chosen, live=True)
+
+    args.live = chosen.live
+    args.providers = ",".join(chosen.providers) if chosen.providers else "all"
+    args.models = chosen.models
+    args.review = chosen.review
+    args.smoke = chosen.smoke
+    args.smoke_install = chosen.smoke_install
+    args.max_nodes = chosen.max_nodes
+    args.concurrency = chosen.concurrency
+
+    if not chosen.configured:
+        print("Nothing saved yet — running on defaults. `llmorch` opens the setup page.")
+    print(f"Settings: {chosen.summary()}")
+    return cmd_chat(args)
+
+
+def cmd_ask(args) -> int:
+    """One question about a session, without opening one.
+
+    The same lane `chat` routes a question into, reached from a shell prompt —
+    for the case where the project is already built and the question is the only
+    thing being said.
+    """
+    session_id = args.session or latest_session()
+    history = Conversation.load(session_id) if session_id else None
+    if history is None:
+        print(
+            "No session to ask about yet. `llmorch \"build a notes app\"` starts one.",
+            file=sys.stderr,
+        )
+        return 2
+
+    print(f"Session {history.session_id}: {len(history.files)} file(s).\n")
+    _answer_question(args, history, runs_dir() / history.session_id, args.question)
     return 0
 
 
@@ -856,6 +1152,59 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--explain", action="store_true")
     chat.set_defaults(func=cmd_chat, task=None, negotiate="auto")
 
+    configure = sub.add_parser(
+        "configure",
+        aliases=["config"],
+        help="open the setup page in a browser (what a bare `llmorch` does)",
+    )
+    configure.add_argument("--port", type=int, default=CONFIGURE_PORT)
+    configure.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="serve the page but do not open it",
+    )
+    configure.set_defaults(func=cmd_configure, task=None)
+
+    start = sub.add_parser(
+        "start",
+        help="a session using whatever the setup page saved",
+    )
+    start.add_argument(
+        "first",
+        nargs="?",
+        default=None,
+        help="an opening instruction, said for you as the first turn",
+    )
+    start.add_argument("--session", default=None, help="continue a specific session id")
+    start.add_argument(
+        "--continue",
+        dest="continue_",
+        action="store_true",
+        help="continue the most recent session",
+    )
+    start.add_argument(
+        "--live", action="store_true", help="override the saved mode for this session"
+    )
+    start.add_argument(
+        "--mock",
+        action="store_true",
+        help="override the saved mode: mock provider, no network",
+    )
+    start.add_argument("--explain", action="store_true")
+    start.set_defaults(func=cmd_start, task=None, negotiate="auto")
+
+    ask = sub.add_parser(
+        "ask",
+        help="answer a question about a session, building nothing",
+    )
+    ask.add_argument("question")
+    ask.add_argument(
+        "--session", default=None, help="which session (default: the most recent)"
+    )
+    ask.add_argument("--live", action="store_true", help="use real providers")
+    ask.add_argument("--providers", default=DEFAULT_LIVE_PROVIDERS)
+    ask.set_defaults(func=cmd_ask, task=None)
+
     plan = sub.add_parser("plan", help="show the assignment without executing")
     plan.add_argument("task", nargs="?", default=None)
     plan.add_argument("--explain", action="store_true")
@@ -934,12 +1283,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     argv = list(sys.argv[1:] if argv is None else argv)
 
-    # `llmorch`, `llmorch "build a notes app"`, `llmorch --live` all open a
-    # session. Anything naming a subcommand is untouched, so `run`, `resume`,
-    # `doctor` and the rest behave exactly as they did.
-    if not argv or (
-        argv[0] not in parser.subcommand_names and argv[0] not in ("-h", "--help")
-    ):
+    # `llmorch` on its own opens the setup page: the choice of models and of
+    # live-versus-mock is the thing a person needs to make first, and making it
+    # on the command line means remaking it every time — with a quiet failure
+    # (a session replaying fixtures) as the cost of forgetting.
+    #
+    # `llmorch "build a notes app"` and `llmorch --live` still open a session,
+    # because both name something to do. Anything naming a subcommand is
+    # untouched, so `run`, `start`, `doctor` and the rest behave as they did.
+    if not argv:
+        argv = ["configure"]
+    elif argv[0] not in parser.subcommand_names and argv[0] not in ("-h", "--help"):
         argv = ["chat", *argv]
 
     args = parser.parse_args(argv)

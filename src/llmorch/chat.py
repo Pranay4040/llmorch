@@ -76,6 +76,17 @@ class Turn:
     completed: tuple[str, ...] = ()
     degraded: tuple[str, ...] = ()
 
+    kind: str = "build"
+    """build | ask | remark — which lane the line was handled in.
+
+    Recorded rather than inferred, because the same sentence can go either way
+    once `/ask` and `/build` exist, and a later turn reading the history has to
+    see what was actually done, not what the classifier would decide today."""
+
+    answer: str = ""
+    """The reply, for an `ask` turn. Kept so a follow-up question has the thread
+    of the conversation, and so `/history` can show what was said back."""
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "instruction": self.instruction,
@@ -83,16 +94,24 @@ class Turn:
             "planned": list(self.planned),
             "completed": list(self.completed),
             "degraded": list(self.degraded),
+            "kind": self.kind,
+            "answer": self.answer,
         }
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Turn:
+        # `kind` and `answer` are additive: a conversation written before they
+        # existed loads as a session of builds, which is what it was. That is
+        # why the file version does not move — bumping it would decline every
+        # session already on disk rather than reading it.
         return cls(
             instruction=str(raw.get("instruction", "")),
             utc=str(raw.get("utc", "")),
             planned=tuple(str(x) for x in raw.get("planned") or ()),
             completed=tuple(str(x) for x in raw.get("completed") or ()),
             degraded=tuple(str(x) for x in raw.get("degraded") or ()),
+            kind=str(raw.get("kind") or "build"),
+            answer=str(raw.get("answer") or ""),
         )
 
 
@@ -163,6 +182,25 @@ class Conversation:
         self.turns.append(turn)
         return turn
 
+    def record_said(
+        self, line: str, *, kind: str, answer: str = "", now: str | None = None
+    ) -> Turn:
+        """Record a turn that built nothing.
+
+        A question and an acknowledgement both leave the project exactly as it
+        was, so neither touches `files` or `interface`. They are still turns:
+        the session is a record of what was said, and a question that vanished
+        from it would take its answer with it.
+        """
+        turn = Turn(
+            instruction=line,
+            utc=now or datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            kind=kind,
+            answer=answer,
+        )
+        self.turns.append(turn)
+        return turn
+
     def note_for(self, node_id: str) -> FileNote | None:
         for note in self.files.values():
             if note.node_id == node_id:
@@ -192,10 +230,21 @@ class Conversation:
     # What the planner is told
     # ------------------------------------------------------------------
 
+    @property
+    def instructions(self) -> list[Turn]:
+        """The turns that asked for something to be built.
+
+        Questions and acknowledgements are excluded deliberately. The planner is
+        shown this list as "what you have been asked so far", and "what does the
+        server do?" was never asked of it — leaving it in would invite a plan
+        that answers it in a file.
+        """
+        return [t for t in self.turns if t.kind == "build"]
+
     def render_memory(self) -> str:
         """The conversation so far, in the form the next plan is made against."""
         lines = ["## What you have been asked so far", ""]
-        for index, turn in enumerate(self.turns, start=1):
+        for index, turn in enumerate(self.instructions, start=1):
             lines.append(f"{index}. {turn.instruction}")
 
         lines += ["", "## The project as it stands", ""]
@@ -206,6 +255,50 @@ class Conversation:
             first = summary[0] if summary else ""
             lines.append(f"- `{path}`{role} — {first}")
 
+        return "\n".join(lines)
+
+    def render_for_answer(self) -> str:
+        """The same memory, written for someone answering a question about it.
+
+        A separate document from `render_memory` rather than a flag on it: the
+        planner is told what to change, and is not helped by knowing which model
+        wrote which file. Someone answering "why is the page like that?" is.
+        """
+        lines = ["## What this project was asked to be", ""]
+        for index, turn in enumerate(self.instructions, start=1):
+            lines.append(f"{index}. {turn.instruction}")
+        if not self.instructions:
+            lines.append("(nothing has been built in this session yet)")
+
+        lines += ["", "## The files, and who wrote each", ""]
+        if not self.files:
+            lines.append("(none yet)")
+        for path in sorted(self.files):
+            note = self.files[path]
+            role = f" ({note.role})" if note.role else ""
+            by = f" [written by {note.model_id}]" if note.model_id else ""
+            summary = " ".join(note.summary.strip().split())
+            lines.append(f"- `{path}`{role}{by} — {summary}")
+
+        return "\n".join(lines)
+
+    def render_exchanges(self, limit: int = 3, *, width: int = 400) -> str:
+        """The last few questions and answers, for a follow-up to hang on.
+
+        Bounded twice — how many, and how long each — because this is the one
+        part of the memory that would otherwise grow without limit, and "why?"
+        needs the previous answer, not the previous ten.
+        """
+        asked = [t for t in self.turns if t.kind == "ask" and t.answer][-limit:]
+        if not asked:
+            return ""
+        lines = ["## Questions already answered in this session", ""]
+        for turn in asked:
+            reply = " ".join(turn.answer.split())
+            if len(reply) > width:
+                reply = reply[:width].rstrip() + "…"
+            lines.append(f"- Q: {turn.instruction}")
+            lines.append(f"  A: {reply}")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -246,7 +339,7 @@ class Conversation:
         if not path.is_file():
             return None
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw = json.loads(path.read_text(encoding="utf-8-sig"))
         except (json.JSONDecodeError, OSError):
             return None
         if int(raw.get("version", 0)) != CONVERSATION_VERSION:
