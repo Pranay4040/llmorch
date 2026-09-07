@@ -33,12 +33,16 @@ jobs:
       matrix:
         include:
           # The floor and the ceiling of the supported range, plus Windows —
-          # the platform whose faults this project keeps discovering the hard way.
+          # the platform whose faults this project keeps discovering the hard
+          # way — plus macOS, because the README tells people to install there
+          # and nothing was checking that it worked.
           - os: ubuntu-latest
             python: "3.11"
           - os: ubuntu-latest
             python: "3.13"
           - os: windows-latest
+            python: "3.12"
+          - os: macos-latest
             python: "3.12"
 
     steps:

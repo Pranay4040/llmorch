@@ -400,9 +400,10 @@ class _Server(ThreadingHTTPServer):
     """Threading, and refusing to share a port.
 
     `HTTPServer` sets `allow_reuse_address`, which on POSIX only skips
-    TIME_WAIT. On Windows it means something else entirely: a *second* process
-    may bind an address another process is already listening on, and which of
-    them a connection reaches is arbitrary.
+    TIME_WAIT and is wanted. On Windows it means something else entirely: a
+    *second* process may bind an address another process is already listening
+    on, and which of them a connection reaches is arbitrary. So it is switched
+    off there and left alone everywhere else.
 
     That is not theoretical here. Two `llmorch` setup servers were live on 8788
     at once, and the older one answered a link the newer one had just printed —
@@ -411,7 +412,13 @@ class _Server(ThreadingHTTPServer):
     saying it is already running.
     """
 
-    allow_reuse_address = False
+    # Windows only. `SO_REUSEADDR` does not mean the same thing on both
+    # platforms: on Windows it permits a *second* process to bind an address a
+    # first is already listening on, which is the hazard above; on POSIX it only
+    # skips TIME_WAIT, and turning it off there means restarting this server
+    # shortly after a browser was connected fails with EADDRINUSE — reported by
+    # the message below as another instance running, which would be a lie.
+    allow_reuse_address = os.name != "nt"
     daemon_threads = True
 
     def handle_error(self, request, client_address) -> None:

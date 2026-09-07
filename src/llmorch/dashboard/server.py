@@ -23,6 +23,7 @@ execute anything it is handed.
 from __future__ import annotations
 
 import json
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -125,12 +126,13 @@ def build_server(
     # client — another tab, or a curl to check something — would hang until the
     # browser was closed. Found exactly that way.
     #
-    # And not sharing the port. `allow_reuse_address` on Windows lets a second
-    # process bind an address a first is already listening on, with connections
-    # going to whichever wins — so two dashboards disagree about what is
-    # happening and neither is obviously wrong.
+    # And, on Windows, not sharing the port: `allow_reuse_address` there lets a
+    # second process bind an address a first is already listening on, with
+    # connections going to whichever wins, so two dashboards disagree about what
+    # is happening and neither is obviously wrong. On POSIX the same flag only
+    # skips TIME_WAIT and is wanted, so it stays on.
     class _Server(ThreadingHTTPServer):
-        allow_reuse_address = False
+        allow_reuse_address = os.name != "nt"
         daemon_threads = True
 
         def handle_error(self, request, client_address) -> None:
