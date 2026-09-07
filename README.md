@@ -133,6 +133,14 @@ the flags are chosen once rather than restated every time. The command line stil
 overrides them (`llmorch start --mock`), because a stored preference should never
 be the reason you cannot do something once.
 
+It has a tab per mode — **Chat**, **AI agent**, **Crew** — each holding what
+that mode needs and nothing else: who answers questions and whether an answer
+may quote a file you named; which single model writes everything, and the warning
+that review cannot run when there is only one; review depth, node budget and how
+many run at once. Choosing a mode there is its own control rather than a side
+effect of opening the tab, so looking at what a mode would do never changes which
+one you get.
+
 Its **Who does what** tab is where you say which model does which job —
 planner, chat and questions, backend, frontend, styling, docs, glue, reviewer.
 Anything left on *Automatic* is assigned the way it always was: by fitness,

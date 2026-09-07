@@ -464,9 +464,17 @@ def _pins(args, manifest: Manifest, warnings: list[str]) -> dict:
     # models, not which.
     if mode_module.parse(getattr(args, "mode", None)) is mode_module.Mode.AGENT:
         reachable = sorted(m.id for m in manifest.enabled_models)
-        soloist = next(iter(wanted.values()), None) or pick_planner(
-            manifest, reachable
+        named = getattr(args, "agent_model", "") or ""
+        soloist = (
+            (named if named in reachable else None)
+            or next(iter(wanted.values()), None)
+            or pick_planner(manifest, reachable)
         )
+        if named and named not in reachable:
+            warnings.append(
+                f"one agent: {named} is not in this run's roster — using "
+                "the best planner available instead"
+            )
         if soloist is None:
             warnings.append("one-agent mode: no model available to be the agent")
         else:
@@ -765,9 +773,14 @@ def _answer_question(
 
         # Only what the question named. A question that names no file is
         # answered from summaries, which is what the session remembers anyway.
-        on_disk = _read_output(run_dir / "output")
-        named = files_named(question, sorted(on_disk))
-        excerpts = take_excerpts(on_disk, named)
+        if getattr(args, "answer_reads_files", True):
+            on_disk = _read_output(run_dir / "output")
+            named = files_named(question, sorted(on_disk))
+            excerpts = take_excerpts(on_disk, named)
+        else:
+            # The only path by which what you built reaches a provider. Off
+            # means answers come from the summaries the session already holds.
+            excerpts = {}
 
         deps = _worker_deps(
             manifest=roster.manifest,
@@ -971,6 +984,8 @@ def cmd_start(args) -> int:
     args.role_models = dict(chosen.role_models)
     if getattr(args, "mode", None) is None and chosen.mode:
         args.mode = chosen.mode
+    args.agent_model = chosen.agent_model
+    args.answer_reads_files = chosen.answer_reads_files
     args.review = chosen.review
     args.smoke = chosen.smoke
     args.smoke_install = chosen.smoke_install

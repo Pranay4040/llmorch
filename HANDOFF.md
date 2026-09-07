@@ -109,6 +109,18 @@ Ordered by value. Issues #1–#4 are filed on GitHub.
 
 Each was learned by getting it wrong against a live API.
 
+- **Opening a tab is not choosing.** Each mode tab carries its own "always
+  use this mode / ask me at the start" control, because a tab that selected the
+  mode by being opened would mean you could not look at what a mode does without
+  changing which one you get.
+- **A control shown twice has one source.** The answering model appears on both
+  *Who does what* and *Chat*; both are filled by `fillRolePicker` from the same
+  data and kept in step by `mirrorRole`, rather than being two places that
+  separately remember the same fact.
+- **An answer quoting a file is the only path by which what you built reaches a
+  provider.** `answer_reads_files` is on by default because grounding beats
+  inference, and exists at all because that sentence is worth being able to act
+  on.
 - **The three session modes are settings, not implementations.** Chat is the
   question lane as a standing choice, one agent is every job pinned at once, and
   a crew is the default behaviour. Adding a fourth mode should mean finding

@@ -451,3 +451,37 @@ def test_leaving_the_mode_empty_means_ask_every_time(site):
 
     assert settings_module.load().mode == ""
     assert mode_module.parse(settings_module.load().mode) is None
+
+
+def test_the_agent_model_and_the_answer_setting_round_trip(site):
+    """The two settings the mode tabs exist to hold."""
+    base, token = site
+    with _post(
+        f"{base}/api/settings",
+        {"mode": "agent", "agent_model": "groq/qwen3-27b", "answer_reads_files": False},
+        token=token,
+    ) as response:
+        assert json.loads(response.read())["ok"] is True
+
+    saved = settings_module.load()
+    assert saved.mode == "agent"
+    assert saved.agent_model == "groq/qwen3-27b"
+    assert saved.answer_reads_files is False
+
+
+def test_answers_may_quote_files_unless_told_otherwise():
+    """On by default: an answer grounded in the file beats one inferred from a
+    one-line summary, and it is what the answer prompt is written around."""
+    assert settings_module.Settings().answer_reads_files is True
+    assert settings_module.from_dict({}).answer_reads_files is True
+    assert settings_module.from_dict({"answer_reads_files": False}).answer_reads_files is False
+
+
+def test_the_page_has_a_tab_for_each_mode():
+    from llmorch.configure.page import PAGE
+
+    for tab in ('data-tab="chat"', 'data-tab="agent"', 'data-tab="crew"'):
+        assert tab in PAGE
+    # Selecting a mode is its own control, so opening a tab to look at what a
+    # mode would do does not change which one you get.
+    assert 'id="pick-chat"' in PAGE and "Always use this mode" in PAGE

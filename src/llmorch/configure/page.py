@@ -89,7 +89,8 @@ PAGE = """<!doctype html>
     background: var(--bg); border: 1px solid var(--line); border-radius: 4px;
     padding: 1px 6px;
   }
-  nav.tabs { display: flex; gap: 4px; margin: 0 0 18px; border-bottom: 1px solid var(--line); }
+  nav.tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 18px;
+             border-bottom: 1px solid var(--line); }
   nav.tabs button {
     background: transparent; color: var(--muted); border: 0; border-bottom: 2px solid transparent;
     border-radius: 0; padding: 9px 16px; font: inherit; cursor: pointer;
@@ -104,6 +105,9 @@ PAGE = """<!doctype html>
   .role:first-of-type { border-top: 0; }
   .role .blurb { color: var(--muted); font-size: 13px; margin-top: 3px; }
   .role select { max-width: 320px; }
+  .pick { display: flex; gap: 22px; padding: 10px 0 4px; border-bottom: 1px solid var(--line);
+          margin-bottom: 12px; }
+  .pick label { display: flex; gap: 8px; align-items: baseline; }
   .warn { color: var(--warn); }
   .bad { color: var(--bad); }
 </style>
@@ -152,29 +156,83 @@ PAGE = """<!doctype html>
     <p id="rolewarn" class="hint warn"></p>
   </section>
 
-  <section data-tab="runs">
-    <h2>How runs behave</h2>
-    <div class="opts">
-      <label class="check">mode
-        <select id="mode">
-          <option value="">ask me at the start of each session</option>
-          <option value="chat">chat — questions only</option>
-          <option value="agent">one agent — a single model writes everything</option>
-          <option value="crew">a crew — several models, cross-vendor review</option>
-        </select>
+  <section data-tab="chat">
+    <h2>Chat</h2>
+    <p class="hint">Questions only. Nothing is built, and no file is written.</p>
+    <div id="pick-chat" class="pick"></div>
+    <div class="role">
+      <div>
+        <div class="name">Who answers</div>
+        <div class="blurb">Also used for any question typed inside a build
+          session. Same control as the <em>Who does what</em> tab.</div>
+      </div>
+      <select data-role="research" data-mirror="1"></select>
+    </div>
+    <div class="opts" style="margin-top:12px">
+      <label class="check">
+        <input type="checkbox" id="answer_reads_files">
+        answers may quote a file the question names
       </label>
-      <label class="check"><input type="checkbox" id="live"> call real providers</label>
+    </div>
+    <p class="hint">
+      On, an answer is grounded in the file rather than inferred from a one-line
+      summary. Off, nothing you built is ever sent to a provider — this is the
+      only path by which it would be.
+    </p>
+  </section>
+
+  <section data-tab="agent">
+    <h2>AI agent</h2>
+    <p class="hint">One model plans the work and writes every file in it.</p>
+    <div id="pick-agent" class="pick"></div>
+    <div class="role">
+      <div>
+        <div class="name">The agent</div>
+        <div class="blurb">Empty picks the best planner available, which is the
+          same choice made for the one request every run depends on.</div>
+      </div>
+      <select id="agent_model"></select>
+    </div>
+    <p class="hint warn" style="margin-top:12px">
+      Cross-vendor review cannot run in this mode. A reviewer must come from a
+      different vendor than the author — a model tends to re-approve its own
+      mistake — and with one model there is no second vendor to ask. The eight
+      cross-artifact checks still run; they cost nothing and read the files.
+    </p>
+  </section>
+
+  <section data-tab="crew">
+    <h2>Crew</h2>
+    <p class="hint">
+      Several models from different vendors split the work, review each other,
+      and are held to one shared contract.
+    </p>
+    <div id="pick-crew" class="pick"></div>
+    <div class="opts" style="margin-top:12px">
       <label class="check">review
         <select id="review">
-          <option value="off">off</option>
-          <option value="code">code</option>
-          <option value="all">all</option>
+          <option value="off">off — no cross-vendor review</option>
+          <option value="code">code — review the files that are code</option>
+          <option value="all">all — review everything written</option>
         </select>
       </label>
+      <label class="check">max nodes <input type="number" id="max_nodes" min="1" max="25"></label>
+      <label class="check">at once <input type="number" id="concurrency" min="1" max="16"></label>
+    </div>
+    <p class="hint">
+      Who gets which job is on the <em>Who does what</em> tab. Leave it all on
+      Automatic and the work is split by fitness, remaining quota and an even
+      share.
+    </p>
+  </section>
+
+  <section data-tab="runs">
+    <h2>How runs behave</h2>
+    <p class="hint">True of every mode.</p>
+    <div class="opts">
+      <label class="check"><input type="checkbox" id="live"> call real providers</label>
       <label class="check"><input type="checkbox" id="smoke"> start what it builds</label>
       <label class="check"><input type="checkbox" id="smoke_install"> ...installing deps first</label>
-      <label class="check">max nodes <input type="number" id="max_nodes" min="1" max="25"></label>
-      <label class="check">concurrency <input type="number" id="concurrency" min="1" max="16"></label>
     </div>
     <p class="hint" id="livehint"></p>
   </section>
@@ -284,7 +342,6 @@ function drawUnstaffed() {
 function drawSettings() {
   const s = config.settings;
   document.getElementById("live").checked = s.live;
-  document.getElementById("mode").value = s.mode || "";
   document.getElementById("review").value = s.review;
   document.getElementById("smoke").checked = s.smoke;
   document.getElementById("smoke_install").checked = s.smoke_install;
@@ -304,6 +361,9 @@ const TABS = [
   {id: "keys", label: "Keys"},
   {id: "models", label: "Models"},
   {id: "roles", label: "Who does what"},
+  {id: "chat", label: "Chat", mode: "chat"},
+  {id: "agent", label: "AI agent", mode: "agent"},
+  {id: "crew", label: "Crew", mode: "crew"},
   {id: "runs", label: "Runs"},
 ];
 let active = location.hash.replace("#", "") || "keys";
@@ -330,10 +390,78 @@ function drawTabs() {
       const pinned = config.roles.filter(r => r.pinned).length;
       if (pinned) button.append(el("span", "count", String(pinned)));
     }
+    // A tick on the mode that sessions will actually open in, so the choice is
+    // visible from every tab rather than only from the one holding it.
+    if (tab.mode && config && config.settings.mode === tab.mode) {
+      button.append(el("span", "count", "in use"));
+    }
     button.addEventListener("click", () => showTab(tab.id));
     nav.append(button);
   }
   showTab(active);
+}
+
+// Selecting a mode is its own control rather than a side effect of opening the
+// tab: looking at what a mode would do must not change which one you get.
+const MODES = ["chat", "agent", "crew"];
+
+function drawModePickers() {
+  for (const mode of MODES) {
+    const host = document.getElementById("pick-" + mode);
+    if (!host) continue;
+    host.replaceChildren();
+    for (const [value, text] of [
+      [mode, "Always use this mode"],
+      ["", "Ask me at the start of each session"],
+    ]) {
+      const label = el("label");
+      const radio = el("input");
+      radio.type = "radio";
+      radio.name = "mode-" + mode;
+      radio.checked = (config.settings.mode || "") === value;
+      radio.addEventListener("change", () => {
+        config.settings.mode = value;
+        drawModePickers();
+        drawTabs();
+      });
+      label.append(radio, el("span", null, text));
+      host.append(label);
+    }
+  }
+}
+
+function drawModeSettings() {
+  const s = config.settings;
+  document.getElementById("answer_reads_files").checked = s.answer_reads_files;
+
+  const agent = document.getElementById("agent_model");
+  agent.replaceChildren();
+  agent.append(new Option("Automatic — the best planner available", ""));
+  for (const id of chosenModels()) agent.append(new Option(id, id));
+  agent.value = chosenModels().includes(s.agent_model) ? s.agent_model : "";
+}
+
+function fillRolePicker(picker, role, available) {
+  picker.replaceChildren();
+  picker.dataset.role = role.name;
+  picker.append(new Option("Automatic — best fit, fair share", ""));
+
+  // The models the manifest lists for this job first, then everything else:
+  // a pin is a person overruling that preference, so it must not also be the
+  // limit of what they can pick.
+  const suggested = role.models.filter(id => available.has(id));
+  const rest = config.models.map(m => m.id)
+    .filter(id => available.has(id) && !suggested.includes(id));
+
+  for (const [group, ids] of [["suited to this job", suggested], ["others", rest]]) {
+    if (!ids.length) continue;
+    const box = document.createElement("optgroup");
+    box.label = group;
+    for (const id of ids) box.append(new Option(id, id));
+    picker.append(box);
+  }
+  picker.value = available.has(role.pinned) ? role.pinned : "";
+  picker.onchange = () => { drawRoleWarning(); mirrorRole(role.name); };
 }
 
 function drawRoles() {
@@ -349,38 +477,37 @@ function drawRoles() {
     row.append(left);
 
     const picker = el("select");
-    picker.dataset.role = role.name;
-    picker.append(new Option("Automatic — best fit, fair share", ""));
-
-    // The models the manifest lists for this job first, then everything else:
-    // a pin is a person overruling that preference, so it must not also be the
-    // limit of what they can pick.
-    const suggested = role.models.filter(id => available.has(id));
-    const rest = config.models.map(m => m.id)
-      .filter(id => available.has(id) && !suggested.includes(id));
-
-    for (const [group, ids] of [["suited to this job", suggested], ["others", rest]]) {
-      if (!ids.length) continue;
-      const box = document.createElement("optgroup");
-      box.label = group;
-      for (const id of ids) box.append(new Option(id, id));
-      picker.append(box);
-    }
-
-    picker.value = available.has(role.pinned) ? role.pinned : "";
-    picker.addEventListener("change", drawRoleWarning);
+    fillRolePicker(picker, role, available);
     row.append(picker);
     host.append(row);
+
+    // The same job can be shown on the tab for the mode it belongs to. That
+    // copy is filled from the same data rather than kept as a second source of
+    // truth, so the two cannot drift.
+    for (const mirror of document.querySelectorAll(
+      `select[data-mirror][data-role="${role.name}"]`
+    )) {
+      fillRolePicker(mirror, role, available);
+    }
   }
   drawRoleWarning();
 }
 
 function chosenRoles() {
   const out = {};
+  // A role may be shown twice — once on "Who does what" and once on the tab for
+  // the mode it belongs to. Last non-empty wins; they are kept in step by
+  // `mirrorRole`, so they never actually disagree.
   for (const picker of document.querySelectorAll("[data-role]")) {
     if (picker.value) out[picker.dataset.role] = picker.value;
   }
   return out;
+}
+
+function mirrorRole(role) {
+  const pickers = [...document.querySelectorAll(`[data-role="${role}"]`)];
+  const source = pickers.find(p => p.value) || pickers[0];
+  for (const picker of pickers) picker.value = source ? source.value : "";
 }
 
 function drawRoleWarning() {
@@ -410,6 +537,8 @@ async function load() {
     drawProviders();
     drawModels();
     drawRoles();
+    drawModePickers();
+    drawModeSettings();
     drawSettings();
     drawTabs();
     status(config.settings.configured ? "loaded" : "not configured yet");
@@ -445,7 +574,9 @@ document.getElementById("save").addEventListener("click", async () => {
   const picked = chosenModels();
   const payload = {
     live: document.getElementById("live").checked,
-    mode: document.getElementById("mode").value,
+    mode: config.settings.mode || "",
+    agent_model: document.getElementById("agent_model").value,
+    answer_reads_files: document.getElementById("answer_reads_files").checked,
     review: document.getElementById("review").value,
     smoke: document.getElementById("smoke").checked,
     smoke_install: document.getElementById("smoke_install").checked,

@@ -87,6 +87,19 @@ class Settings:
     someone who wanted to ask a question and got a six-file project has paid for
     the misunderstanding."""
 
+    agent_model: str = ""
+    """In one-agent mode, the model that writes everything. Empty picks the best
+    planner available, which is the same choice `pick_planner` makes for the one
+    request every run depends on."""
+
+    answer_reads_files: bool = True
+    """Whether an answer may quote a file the question names.
+
+    On by default: an answer grounded in the file beats one inferred from a
+    one-line summary, and it is the difference the answer prompt is written
+    around. Worth being able to switch off — it is the only path by which the
+    contents of what you built reach a provider at all."""
+
     review: str = "code"
     smoke: bool = False
     smoke_install: bool = False
@@ -109,6 +122,8 @@ class Settings:
             "models": list(self.models),
             "role_models": dict(self.role_models),
             "mode": self.mode,
+            "agent_model": self.agent_model,
+            "answer_reads_files": self.answer_reads_files,
             "review": self.review,
             "smoke": self.smoke,
             "smoke_install": self.smoke_install,
@@ -193,6 +208,8 @@ def from_dict(raw: Any) -> Settings:
         models=_names(raw.get("models")),
         role_models=_pairs(raw.get("role_models")),
         mode=str(raw.get("mode") or "").strip().lower(),
+        agent_model=str(raw.get("agent_model") or "").strip(),
+        answer_reads_files=bool(raw.get("answer_reads_files", True)),
         review=review if review in REVIEW_MODES else "code",
         smoke=bool(raw.get("smoke", False)),
         smoke_install=bool(raw.get("smoke_install", False)),

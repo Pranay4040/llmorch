@@ -258,3 +258,51 @@ def test_an_unknown_saved_mode_falls_through_to_being_asked():
     """`parse` returning None is what makes the question happen, so a settings
     file with nonsense in it must not silently pick a mode."""
     assert mode_module.parse("multi-agentic-super-mode") is None
+
+
+def test_the_named_agent_writes_everything(tmp_path, monkeypatch, capsys):
+    """The AI agent tab's one setting, end to end."""
+    from llmorch import __main__ as cli
+
+    _offline(monkeypatch, tmp_path)
+    settings_module.Settings(
+        live=False, mode="agent", agent_model="groq/qwen3-27b"
+    ).save()
+    _script(monkeypatch, "build a notes app", "/quit")
+
+    assert cli.main(["start", "--mock"]) == 0
+
+    conversation = Conversation.load(_session_id(capsys.readouterr().out))
+    assert {n.model_id for n in conversation.files.values()} == {"groq/qwen3-27b"}
+
+
+def test_an_agent_that_is_not_in_the_roster_says_so(tmp_path, monkeypatch, capsys):
+    from llmorch import __main__ as cli
+
+    _offline(monkeypatch, tmp_path)
+    settings_module.Settings(
+        live=False, mode="agent", agent_model="groq/retired-yesterday"
+    ).save()
+    _script(monkeypatch, "build a notes app", "/quit")
+
+    cli.main(["start", "--mock", "--tables"])
+    out = capsys.readouterr().out
+
+    assert "not in this run's roster" in out
+    assert "best planner available instead" in out
+
+
+def test_a_question_can_be_kept_away_from_the_files(tmp_path, monkeypatch, capsys):
+    """Off, nothing that was built is ever sent to a provider — this is the only
+    path by which it would be."""
+    from llmorch import __main__ as cli
+
+    _offline(monkeypatch, tmp_path, answer_response="From the summaries only.")
+    settings_module.Settings(live=False, mode="crew", answer_reads_files=False).save()
+    _script(monkeypatch, "build a notes app", "what does server.py do?", "/quit")
+
+    assert cli.main(["start", "--mock"]) == 0
+
+    out = capsys.readouterr().out
+    assert "From the summaries only." in out
+    assert "reading server.py" not in out
