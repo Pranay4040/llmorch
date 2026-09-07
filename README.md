@@ -267,6 +267,27 @@ left enabled that nothing can reach is a node assigned to nobody. The same
 narrowing covers a provider that is enabled in `models.yaml` with no key in the
 environment, which is the identical fault through a quieter door.
 
+## What is in this repository
+
+| Path | What lives there |
+|---|---|
+| `src/llmorch/quota/` | The library. Admission control (`governor.py`), the append-only usage ledger (`store.py`), sliding windows and day keys (`windows.py`), self-correcting token estimation (`estimator.py`). Imports nothing from the orchestrator, and a test asserts it. |
+| `src/llmorch/providers/` | One dependency-free client for any OpenAI-shaped endpoint, plus rate-limit header parsing and a deterministic mock that can inject each failure a real free tier produces. |
+| `src/llmorch/registry/` | `models.yaml` loaded and validated — every role chain must span two vendors, every paid provider must declare pricing, every model must fit its provider's per-request ceiling. |
+| `src/llmorch/negotiate/` | Deciding *who does what*: task decomposition, revision, bidding, the assignment reconciler, question-vs-instruction classification, and answering a question. |
+| `src/llmorch/engine/` | Running it: the scheduler, the worker with its failover ladder, cross-vendor review, the two verification tiers, cross-artifact contract checks, materialisation, checkpoints, the smoke run, and live progress. |
+| `src/llmorch/configure/` | The setup page — the only server here that accepts a write. |
+| `src/llmorch/dashboard/` | The read-only window on quota, spend and the run in flight. |
+| `src/llmorch/report/` | Terminal renderers and `report.md`. Recompute nothing, so the file and the screen cannot disagree. |
+| `tests/` | 765 of them, no network, no keys. `conftest.py` unsets every provider key so the suite tests the code and not the machine. |
+| `models.yaml` | The roster: 15 models across 3 vendors, every wire name confirmed with a live call. |
+| `docs/original-plan.md` | The plan this was built from. |
+| `HANDOFF.md` | Current state, what is next, and the invariants not to break — each one learned by getting it wrong against a live API. |
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).
+
 Current state, what is next, and the invariants not to break are in
 [HANDOFF.md](HANDOFF.md). The original 45k plan is in
 [docs/original-plan.md](docs/original-plan.md).
