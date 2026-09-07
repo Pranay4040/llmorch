@@ -22,12 +22,13 @@ from ..quota.estimator import TokenEstimator
 from ..quota.governor import Governor
 from ..quota.store import LedgerStore
 from ..registry.manifest import Manifest
-from ..types import Assignment, NodeResult, NodeState, Priority
+from ..types import Assignment, NodeResult, NodeState, Priority, Role
 from .blackboard import Blackboard
 from .checkpoint import Checkpoint, NodeSnapshot, new_checkpoint
 from .checkpoint import save as save_checkpoint
 from .graph import TaskGraph
 from .health import HealthTracker, ModelHealth
+from .progress import ProgressWriter
 from .worker import WorkerDeps, execute_node
 
 
@@ -70,6 +71,9 @@ class Scheduler:
         ledger: LedgerStore | None = None,
         profiles: Profiles | None = None,
         checkpoints: bool = False,
+        pins: dict | None = None,
+        strategy: str = "fitness",
+        progress: ProgressWriter | None = None,
         sleep=asyncio.sleep,
     ) -> None:
         self.graph = graph
@@ -85,6 +89,15 @@ class Scheduler:
         self.ledger = ledger
         self.profiles = profiles or Profiles()
         self.checkpoints = checkpoints
+        self.strategy = strategy
+        """fitness | round_robin — see `ReconcileInput.strategy`."""
+        self.pins = dict(pins or {})
+        """role -> model a person chose. Binds the assignment, never failover."""
+        self.progress = progress
+        """Live state for anything watching. Optional, and never load-bearing:
+        every call to it is wrapped by the writer itself, because a run that
+        died over its own progress file would be monitoring that costs more
+        than it reports."""
         self.sleep = sleep
 
     # -- assignment -------------------------------------------------------
@@ -108,6 +121,8 @@ class Scheduler:
             bids=bids,
             track_record=self.profiles.as_track_record(),
             quota_pressure=self._quota_pressure(),
+            pins={role: m for role, m in self.pins.items() if m not in exclude},
+            strategy=self.strategy,
             imbalance_tolerance=self.config.imbalance_tolerance,
         )
 
@@ -165,6 +180,15 @@ class Scheduler:
             )
         outcome.warnings.extend(plan.notes)
 
+        if self.progress is not None:
+            self.progress.begin(
+                self.graph.nodes, outcome.assignments, headroom=self.governor.headroom
+            )
+            for node_id in carried:
+                self.progress.restored(node_id, outcome.results[node_id])
+            for node_id in plan.unassigned:
+                self.progress.node_finished(node_id, outcome.results[node_id])
+
         book = None
         if self.checkpoints:
             book = resume or new_checkpoint(
@@ -183,6 +207,10 @@ class Scheduler:
             blackboard=self.blackboard,
             max_retries=self.config.max_retries,
             review=self.config.review,
+            # The review pin travels separately from the assignment pins: a
+            # reviewer is chosen per node at execution time, against the author,
+            # not laid out in advance by the reconciler.
+            review_model=self.pins.get(Role.REVIEW, ""),
             sleep=self.sleep,
             ledger=self.ledger,
             run_id=self.config.run_id,
@@ -210,6 +238,8 @@ class Scheduler:
                         if self.graph.dependents_of(node_id)
                         else Priority.NORMAL
                     )
+                    if self.progress is not None:
+                        self.progress.node_started(node_id, model_id)
                     result = await execute_node(node, model_id, deps, priority=priority)
                     return node_id, result
 
@@ -217,6 +247,8 @@ class Scheduler:
                 *(run_one(n) for n in ready)
             ):
                 outcome.results[node_id] = result
+                if self.progress is not None:
+                    self.progress.node_finished(node_id, result)
                 self.blackboard.record(result)
                 # What actually happened is the only input to the dispatcher
                 # that was not assumed in advance.

@@ -2,6 +2,9 @@
 
     llmorch run "build a notes app"          # mock provider, no network
     llmorch run --live "build a notes app"   # real requests, Groq only [M2]
+    llmorch                                  # the setup page, in a browser
+    llmorch start                            # a session, using what it saved
+    llmorch ask "what serves /api/items?"    # a question, not an instruction
     llmorch resume [<run_id>]                # continue after a quota wall
     llmorch plan --explain "build a notes app"
     llmorch quota
@@ -14,12 +17,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from . import mode as mode_module
+from . import settings as settings_module
 from .config import RunConfig, load_dotenv, runs_dir, state_db_path
+from .configure.server import DEFAULT_PORT as CONFIGURE_PORT
+from .configure.server import serve as configure_serve
 from .dashboard.server import DEFAULT_PORT, serve
 from .demo.website import ARTIFACTS, INTERFACE, SUMMARIES, TASK, build_nodes
 from .discover import discover_all
@@ -36,8 +44,14 @@ from .engine.checkpoint import (
 )
 from .engine.contracts import artifacts_from_results, check_contract
 from .engine.graph import TaskGraph
-from .chat import Conversation, latest_session, merge_interfaces
+from .chat import (
+    Conversation,
+    latest_session,
+    merge_interfaces,
+    resolve_session,
+)
 from .engine.materialize import materialize
+from .engine.progress import ProgressWriter
 from .engine.scheduler import Scheduler
 from .engine.smoke import smoke_run
 from .engine.worker import WorkerDeps
@@ -48,6 +62,12 @@ from .providers.openai_compat import build_live_registry
 from .quota.estimator import TokenEstimator
 from .negotiate import plancache
 from .negotiate.bidding import collect_bids, should_bid
+from .negotiate.answer import (
+    answer,
+    files_named,
+    pick_answerer,
+    take_excerpts,
+)
 from .negotiate.decompose import (
     DecomposeError,
     decompose,
@@ -55,11 +75,12 @@ from .negotiate.decompose import (
     plan_signature,
     revise,
 )
+from .negotiate.intent import Intent, classify
 from .negotiate.profiles import Profiles
 from .quota.governor import Governor
 from .quota.store import DayUsage, LedgerStore, restore_governor
 from .registry.manifest import Manifest, load_manifest
-from .types import InterfaceContract
+from .types import InterfaceContract, Role
 from .report.document import REPORT_NAME, render_run_report
 from .report.ledger import render_day_usage, render_recent, render_restored
 from .report.render import (
@@ -92,19 +113,29 @@ def _providers_arg(value: str | None) -> set[str] | None:
 
 
 @dataclass(slots=True)
-class Session:
-    """Everything a command needs, assembled once."""
+class Roster:
+    """Who can be called, under what accounting — assembled without a plan.
+
+    Split out from `Session` because a question is not a build. Answering one
+    needs the models, the governor and the ledger and nothing else; planning it
+    would spend the request that asking a question exists to avoid.
+    """
 
     manifest: Manifest
     config: RunConfig
-    graph: TaskGraph
     governor: Governor
-    scheduler: Scheduler
-    store: LedgerStore | None
+    registry: ProviderRegistry
     estimator: TokenEstimator
+    store: LedgerStore | None
     restored: dict[str, DayUsage]
     mock: MockProvider | None
     profiles: Profiles
+    warnings: list[str] = field(default_factory=list)
+    pins: dict = field(default_factory=dict)
+    """role -> the model a person chose for it, already validated against this
+    run's roster. Every chooser reads it: the reconciler for the files, and
+    `pick_planner` / `pick_answerer` / `pick_reviewer` for the three jobs no
+    node ever carries."""
 
     def close(self) -> None:
         # The track record is the only thing here that took live requests to
@@ -117,6 +148,52 @@ class Session:
             # away at process exit.
             self.store.save_calibration(self.estimator.to_dict())
             self.store.close()
+
+
+@dataclass(slots=True)
+class Session:
+    """A roster with a plan on top: everything a build needs."""
+
+    roster: Roster
+    graph: TaskGraph
+    scheduler: Scheduler
+
+    # The roster's parts are reached through the session, so a command that
+    # holds one does not have to know which of the two assembled what.
+    @property
+    def manifest(self) -> Manifest:
+        return self.roster.manifest
+
+    @property
+    def config(self) -> RunConfig:
+        return self.roster.config
+
+    @property
+    def governor(self) -> Governor:
+        return self.roster.governor
+
+    @property
+    def store(self) -> LedgerStore | None:
+        return self.roster.store
+
+    @property
+    def estimator(self) -> TokenEstimator:
+        return self.roster.estimator
+
+    @property
+    def restored(self) -> dict[str, DayUsage]:
+        return self.roster.restored
+
+    @property
+    def mock(self) -> MockProvider | None:
+        return self.roster.mock
+
+    @property
+    def profiles(self) -> Profiles:
+        return self.roster.profiles
+
+    def close(self) -> None:
+        self.roster.close()
 
 
 def _mock_registry(manifest) -> tuple[ProviderRegistry, MockProvider]:
@@ -152,7 +229,7 @@ def _worker_deps(
 
 def _plan(
     args, *, config, manifest, governor, registry, estimator, profiles, store,
-    stored_plan: dict | None = None,
+    stored_plan: dict | None = None, pins: dict | None = None,
 ):
     """Decide the task graph, spending as little as possible to get it.
 
@@ -181,7 +258,9 @@ def _plan(
             estimator=estimator, profiles=profiles, store=store, config=config,
             interface=history.interface,
         )
-        planner = pick_planner(manifest, sorted(registry.model_ids))
+        planner = pick_planner(
+            manifest, sorted(registry.model_ids), prefer=(pins or {}).get(Role.PLANNING)
+        )
         if planner is None:
             raise DecomposeError("no model available to plan this change")
         change = asyncio.run(
@@ -228,7 +307,9 @@ def _plan(
         estimator=estimator, profiles=profiles, store=store, config=config,
         interface=InterfaceContract(),
     )
-    planner = pick_planner(manifest, sorted(registry.model_ids))
+    planner = pick_planner(
+        manifest, sorted(registry.model_ids), prefer=(pins or {}).get(Role.PLANNING)
+    )
     if planner is None:
         raise DecomposeError("no model available to plan this task")
 
@@ -243,9 +324,12 @@ def _plan(
     )
 
 
-def _setup(
-    args, *, run_id: str | None = None, stored_plan: dict | None = None
-) -> Session:
+def _roster(args, *, run_id: str | None = None) -> Roster:
+    """Assemble who can be called and how their usage is accounted for.
+
+    No planning happens here: this is everything a single request needs, which
+    is all a question needs.
+    """
     manifest = load_manifest()
     config = RunConfig(
         task=args.task or TASK,
@@ -260,12 +344,33 @@ def _setup(
         max_concurrency=getattr(args, "concurrency", 4),
     )
 
-    governor = Governor(
-        manifest,
-        max_usd=config.max_usd,
-        allow_paid=config.allow_paid,
-        safety_factor=config.token_safety_factor,
-    )
+    warnings: list[str] = []
+    only = _providers_arg(getattr(args, "providers", None))
+
+    # Which models the setup page left ticked. Applied in both modes, so a mock
+    # run rehearses the roster a live one would use.
+    #
+    # Unknown ids are dropped rather than fatal: this list is a file written
+    # when `models.yaml` said something else, and a model retired from the
+    # manifest must not be the reason a session refuses to start.
+    wanted = {m for m in getattr(args, "models", ()) or ()}
+    if wanted:
+        known = {m.id for m in manifest.models}
+        stale = sorted(wanted - known)
+        if stale:
+            warnings.append(
+                f"settings name {', '.join(stale)}, which the manifest no longer "
+                "declares — ignored"
+            )
+        wanted &= known
+    if wanted:
+        manifest = manifest.restricted_to_models(wanted)
+        empty = manifest.unstaffed_roles()
+        if empty:
+            warnings.append(
+                f"no model left to serve {', '.join(sorted(r.value for r in empty))} "
+                "— a node with that role cannot run"
+            )
 
     # A dry run touches neither the ledger nor the network. Recording mock
     # calls would tell tomorrow's admission control that quota was spent which
@@ -281,11 +386,135 @@ def _setup(
     else:
         store = LedgerStore(state_db_path()).open()
         estimator = TokenEstimator.from_dict(store.load_calibration())
-        restored = restore_governor(governor, store, manifest)
-        registry, _ = build_live_registry(
-            manifest,
-            only_providers=_providers_arg(getattr(args, "providers", None)),
+
+        # The roster is narrowed to what can actually be called, *before*
+        # anything is built on it. The assignment, the failover chains and the
+        # governor all read the manifest, and a model left enabled there that no
+        # client serves is a node assigned to nobody: the run fails looking for
+        # a provider that was never built, after the plan has been printed and
+        # the planning request already spent.
+        #
+        # Two ways a model gets left behind, and they are the same fault: named
+        # out by `--providers`, or enabled in the manifest with no key in the
+        # environment. `restricted_to` is what makes the roster agree with the
+        # registry in both cases.
+        if only:
+            manifest = manifest.restricted_to(only)  # also rejects an unknown name
+        registry, _ = build_live_registry(manifest, only_providers=only)
+
+        reachable = {manifest.vendor_of(m) for m in registry.model_ids}
+        keyless = sorted(
+            {m.provider for m in manifest.enabled_models} - reachable
         )
+        if keyless:
+            warnings.append(
+                f"no key for {', '.join(keyless)} — left out of this run's roster"
+            )
+        manifest = manifest.restricted_to(reachable)
+
+        stranded = manifest.single_vendor_roles()
+        if stranded:
+            warnings.append(
+                f"{', '.join(sorted(r.value for r in stranded))} can only be served "
+                f"by {', '.join(sorted(reachable))} in this run — a failure there "
+                "has nowhere to fail over to"
+            )
+
+    governor = Governor(
+        manifest,
+        max_usd=config.max_usd,
+        allow_paid=config.allow_paid,
+        safety_factor=config.token_safety_factor,
+    )
+    if store is not None:
+        restored = restore_governor(governor, store, manifest)
+
+    pins = _pins(args, manifest, warnings)
+
+    return Roster(
+        manifest=manifest,
+        config=config,
+        governor=governor,
+        registry=registry,
+        estimator=estimator,
+        store=store,
+        restored=restored,
+        mock=mock,
+        profiles=profiles,
+        warnings=warnings,
+        pins=pins,
+    )
+
+
+def _pins(args, manifest: Manifest, warnings: list[str]) -> dict:
+    """Turn the saved role→model choices into something the scheduler can use.
+
+    Validated at this boundary rather than trusted, and forgiving in the same
+    way the model list is: the file was written when `models.yaml` said
+    something else, and a retired model must not be the reason a session refuses
+    to start. An unusable pin is dropped with a note, never raised.
+    """
+    from .negotiate.roles import parse_role
+
+    wanted = dict(getattr(args, "role_models", None) or {})
+
+    # One agent is every job pinned to one model — the same mechanism the *Who
+    # does what* tab uses, applied to all of them at once rather than a separate
+    # code path. An explicit pin still wins: choosing this mode says how many
+    # models, not which.
+    if mode_module.parse(getattr(args, "mode", None)) is mode_module.Mode.AGENT:
+        reachable = sorted(m.id for m in manifest.enabled_models)
+        named = getattr(args, "agent_model", "") or ""
+        soloist = (
+            (named if named in reachable else None)
+            or next(iter(wanted.values()), None)
+            or pick_planner(manifest, reachable)
+        )
+        if named and named not in reachable:
+            warnings.append(
+                f"one agent: {named} is not in this run's roster — using "
+                "the best planner available instead"
+            )
+        if soloist is None:
+            warnings.append("one-agent mode: no model available to be the agent")
+        else:
+            for role in Role:
+                wanted.setdefault(role.value, soloist)
+            warnings.append(
+                f"one agent: {soloist} writes every file. Cross-vendor review "
+                "cannot run — there is no second vendor to ask"
+            )
+
+    if not wanted:
+        return {}
+
+    known = {m.id for m in manifest.enabled_models}
+    valid_roles = {role.value: role for role in Role}
+    pins: dict = {}
+
+    for role_name, model_id in wanted.items():
+        role = valid_roles.get(str(role_name).strip().lower())
+        if role is None:
+            warnings.append(f"pinned an unknown role {role_name!r} — ignored")
+            continue
+        if model_id not in known:
+            warnings.append(
+                f"{role.value} is pinned to {model_id}, which is not in this "
+                "run's roster — assigned automatically"
+            )
+            continue
+        pins[role] = model_id
+
+    return pins
+
+
+def _setup(
+    args, *, run_id: str | None = None, stored_plan: dict | None = None
+) -> Session:
+    roster = _roster(args, run_id=run_id)
+    manifest, config = roster.manifest, roster.config
+    governor, registry = roster.governor, roster.registry
+    estimator, store, profiles = roster.estimator, roster.store, roster.profiles
 
     nodes, interface, plan_note = _plan(
         args,
@@ -297,6 +526,7 @@ def _setup(
         profiles=profiles,
         store=store,
         stored_plan=stored_plan,
+        pins=roster.pins,
     )
     graph = TaskGraph.build(nodes)
     graph.prune_to_budget(config.max_nodes)
@@ -314,19 +544,11 @@ def _setup(
         ledger=store,
         profiles=profiles,
         checkpoints=True,
+        pins=roster.pins,
+        strategy=getattr(args, "assignment", "fitness"),
     )
-    return Session(
-        manifest=manifest,
-        config=config,
-        graph=graph,
-        governor=governor,
-        scheduler=scheduler,
-        store=store,
-        estimator=estimator,
-        restored=restored,
-        mock=mock,
-        profiles=profiles,
-    )
+    graph.warnings.extend(roster.warnings)
+    return Session(roster=roster, graph=graph, scheduler=scheduler)
 
 
 # --------------------------------------------------------------------------
@@ -453,11 +675,17 @@ def cmd_resume(args) -> int:
 
 
 CHAT_HELP = """\
+  <a question>      answered from what this session knows; nothing is built
   <anything else>   an instruction: the first builds, the rest change what is built
+  /ask <question>   answer it, whatever it looks like
+  /build <thing>    build it, whatever it looks like
   /files            what the project consists of now
   /history          what you have asked so far
   /report           where this session's report.md is
   /quit             leave (the conversation is saved after every turn)
+
+  A line ending in "?" is a question; "add tags" is an instruction; "thanks" is
+  neither and costs nothing. /ask and /build settle it when the guess is wrong.
 """
 
 
@@ -499,7 +727,7 @@ def _read_output(output_dir: Path) -> dict[str, str]:
     return files
 
 
-def _chat_command(line: str, history: Conversation, config_dir: Path) -> bool:
+def _chat_command(line: str, history: Conversation) -> bool:
     """Handle a `/command`. Returns False when the session should end."""
     command = line.split()[0].lower()
 
@@ -516,16 +744,121 @@ def _chat_command(line: str, history: Conversation, config_dir: Path) -> bool:
     elif command == "/history":
         for index, turn in enumerate(history.turns, start=1):
             degraded = f"  ({len(turn.degraded)} degraded)" if turn.degraded else ""
-            print(f"  {index}. {turn.instruction}{degraded}")
+            mark = {"ask": "?", "remark": "·"}.get(turn.kind, " ")
+            print(f"  {index}. {mark} {turn.instruction}{degraded}")
     elif command == "/report":
-        print(f"  {config_dir / REPORT_NAME}")
+        print(f"  {runs_dir() / history.session_id / REPORT_NAME}")
     else:
         print(f"  unknown command {command}; /help lists them")
     return True
 
 
-def _chat_turn(args, history: Conversation, run_dir: Path, line: str) -> None:
-    """One instruction, planned and carried out against what already exists."""
+def _answer_question(
+    args, history: Conversation, run_dir: Path, question: str
+) -> None:
+    """One question, answered against what this session already knows.
+
+    No graph, no plan, no files. The whole point of the lane is that a question
+    costs one request and leaves the project exactly as it was.
+    """
+    roster = _roster(args, run_id=history.session_id)
+    try:
+        model_id = pick_answerer(
+            roster.manifest,
+            sorted(roster.registry.model_ids),
+            prefer=roster.pins.get(Role.RESEARCH),
+        )
+        if model_id is None:
+            print("  no model available to answer")
+            return
+
+        # Only what the question named. A question that names no file is
+        # answered from summaries, which is what the session remembers anyway.
+        if getattr(args, "answer_reads_files", True):
+            on_disk = _read_output(run_dir / "output")
+            named = files_named(question, sorted(on_disk))
+            excerpts = take_excerpts(on_disk, named)
+        else:
+            # The only path by which what you built reaches a provider. Off
+            # means answers come from the summaries the session already holds.
+            excerpts = {}
+
+        deps = _worker_deps(
+            manifest=roster.manifest,
+            governor=roster.governor,
+            registry=roster.registry,
+            estimator=roster.estimator,
+            profiles=roster.profiles,
+            store=roster.store,
+            config=roster.config,
+            interface=history.interface,
+        )
+        reply = asyncio.run(
+            answer(
+                question,
+                deps=deps,
+                model_id=model_id,
+                memory=history.render_for_answer(),
+                interface_text=Blackboard(interface=history.interface).interface_text(),
+                excerpts=excerpts,
+                exchanges=history.render_exchanges(),
+            )
+        )
+    except LLMOrchError as exc:
+        print(f"  {exc}")
+        return
+    finally:
+        roster.close()
+
+    for line in reply.text.splitlines():
+        print(f"  {line}" if line.strip() else "")
+    read = f", reading {', '.join(reply.files_read)}" if reply.files_read else ""
+    print(f"  — {reply.model_id}{read}\n")
+
+    history.record_said(question, kind="ask", answer=reply.text)
+    history.save()
+
+
+def _chat_turn(
+    args,
+    history: Conversation,
+    line: str,
+    *,
+    intent: Intent | None = None,
+) -> None:
+    """One line of the conversation, in whichever lane it belongs to.
+
+    The classification is free and happens before anything is spent, which is
+    the entire point: "looks good" used to buy a planning request in order to be
+    told there was nothing to plan.
+    """
+    if intent is None and mode_module.parse(getattr(args, "mode", None)) is (
+        mode_module.Mode.CHAT
+    ):
+        # The standing version of `/ask`. `/build` still overrides it, because a
+        # mode is a default and not a lock.
+        intent = Intent.ASK
+    lane = intent or classify(line)
+
+    # Named here, before anything of this session touches the disk: the id is a
+    # directory name, a checkpoint key and the run_id on every ledger row it
+    # produces, so this is the only moment it can change safely.
+    before = history.session_id
+    named = history.name_for(line)
+    if named != before:
+        print(f"  session {named}")
+    run_dir = runs_dir() / named
+
+    if lane is Intent.REMARK:
+        print("  noted — nothing to build\n")
+        history.record_said(line, kind="remark")
+        history.save()
+        return
+
+    if lane is Intent.ASK:
+        _answer_question(args, history, run_dir, line)
+        return
+
     args.task = line
     args.history = history
     prior = _read_output(run_dir / "output")
@@ -554,25 +887,44 @@ def _chat_turn(args, history: Conversation, run_dir: Path, line: str) -> None:
 
 def cmd_chat(args) -> int:
     """A session with the orchestrator rather than one shot at it."""
-    session_id = args.session or (latest_session() if args.continue_ else None)
+    session_id = (
+        resolve_session(args.session) or args.session
+        if args.session
+        else (latest_session() if args.continue_ else None)
+    )
     history = Conversation.load(session_id) if session_id else None
     if history is None:
         history = Conversation(session_id=session_id or _run_id())
-        print(f"New session {history.session_id}.")
+        print("New session — it takes its name from your first instruction.")
     else:
         print(
             f"Resuming {history.session_id}: {len(history.turns)} turn(s), "
             f"{len(history.files)} file(s)."
         )
 
-    print("Type an instruction, or /help. Ctrl-D to leave.\n")
-    run_dir = runs_dir() / history.session_id
+    # Asked before anything is said, because the mismatch is what costs: a
+    # person who wanted to ask a question and got a six-file project has already
+    # paid for the misunderstanding. A resumed session keeps the mode it was
+    # opened in — a conversation whose files a crew wrote is not one that a
+    # single agent has been having — and `--mode` or a saved setting skips it.
+    chosen = (
+        mode_module.parse(getattr(args, "mode", None))
+        or mode_module.parse(history.mode)
+        or mode_module.parse(settings_module.load().mode)
+    )
+    if chosen is None:
+        chosen = mode_module.ask()
+    history.mode = chosen.value
+    args.mode = chosen.value
+    print(f"\n{mode_module.describe(chosen)}")
+
+    print("\nType an instruction, or /help. Ctrl-D to leave.\n")
 
     # `llmorch "build a notes app"` starts the session with that already said,
     # so the shortest way in is one line rather than two.
     if getattr(args, "first", None):
         print(f"> {args.first}")
-        _chat_turn(args, history, run_dir, args.first)
+        _chat_turn(args, history, args.first)
 
     while True:
         try:
@@ -583,13 +935,93 @@ def cmd_chat(args) -> int:
         if not line:
             continue
         if line.startswith("/"):
-            if not _chat_command(line, history, run_dir):
+            # `/ask` and `/build` are not queries about the session, they are
+            # turns with the lane named outright — which is what lets the
+            # classifier stay small instead of growing a case per phrasing.
+            verb, _, rest = line.partition(" ")
+            forced = {"/ask": Intent.ASK, "/build": Intent.BUILD}.get(verb.lower())
+            if forced is not None:
+                if rest.strip():
+                    _chat_turn(args, history, rest.strip(), intent=forced)
+                else:
+                    print(f"  {verb} needs something after it")
+                continue
+            if not _chat_command(line, history):
                 break
             continue
 
-        _chat_turn(args, history, run_dir, line)
+        _chat_turn(args, history, line)
 
     print(f"Session {history.session_id} saved to {history.path}")
+    return 0
+
+
+def cmd_configure(args) -> int:
+    """Open the setup page and stay up until it is closed."""
+    configure_serve(
+        port=getattr(args, "port", CONFIGURE_PORT),
+        open_browser=not getattr(args, "no_browser", False),
+    )
+    return 0
+
+
+def cmd_start(args) -> int:
+    """A session using what the setup page saved.
+
+    The file supplies the defaults and the command line still wins, because a
+    stored preference should never be the reason you cannot do something once.
+    """
+    chosen, complaint = settings_module.read()
+    if complaint:
+        print(f"warning: {complaint}")
+    if getattr(args, "mock", False):
+        chosen = dataclasses.replace(chosen, live=False)
+    elif getattr(args, "live", False):
+        chosen = dataclasses.replace(chosen, live=True)
+
+    args.live = chosen.live
+    args.providers = ",".join(chosen.providers) if chosen.providers else "all"
+    args.models = chosen.models
+    args.role_models = dict(chosen.role_models)
+    if getattr(args, "mode", None) is None and chosen.mode:
+        args.mode = chosen.mode
+    args.agent_model = chosen.agent_model
+    args.answer_reads_files = chosen.answer_reads_files
+    args.assignment = chosen.assignment
+    args.review = chosen.review
+    args.smoke = chosen.smoke
+    args.smoke_install = chosen.smoke_install
+    args.max_nodes = chosen.max_nodes
+    args.concurrency = chosen.concurrency
+
+    if not chosen.configured:
+        print("Nothing saved yet — running on defaults. `llmorch` opens the setup page.")
+    print(f"Settings: {chosen.summary()}")
+    return cmd_chat(args)
+
+
+def cmd_ask(args) -> int:
+    """One question about a session, without opening one.
+
+    The same lane `chat` routes a question into, reached from a shell prompt —
+    for the case where the project is already built and the question is the only
+    thing being said.
+    """
+    session_id = (
+        resolve_session(args.session) or args.session
+        if args.session
+        else latest_session()
+    )
+    history = Conversation.load(session_id) if session_id else None
+    if history is None:
+        print(
+            "No session to ask about yet. `llmorch \"build a notes app\"` starts one.",
+            file=sys.stderr,
+        )
+        return 2
+
+    print(f"Session {history.session_id}: {len(history.files)} file(s).\n")
+    _answer_question(args, history, runs_dir() / history.session_id, args.question)
     return 0
 
 
@@ -617,10 +1049,102 @@ def _bid(session: Session, args) -> list:
         interface=session.scheduler.blackboard.interface,
     )
     bids = asyncio.run(collect_bids(nodes, deps=deps, candidates=candidates))
-    if bids:
+    if bids and getattr(args, "tables", False):
         bidders = len({b.model_id for b in bids})
         print(f"  {len(bids)} bids from {bidders} model(s)")
     return bids
+
+
+def _quiet(*_args, **_kwargs) -> None:
+    """The tables' new destination when `--tables` is off."""
+    return None
+
+
+def dashboard_url() -> str:
+    return f"http://127.0.0.1:{DEFAULT_PORT}"
+
+
+def _contract_facts(contract) -> dict:
+    """The cross-artifact result, as the page needs it.
+
+    Issue text can quote a path or a route a model invented, so it travels as
+    data and the page sets it with `textContent` — the rule the dashboard has
+    always followed about anything a model wrote.
+    """
+    return {
+        "ok": contract.ok,
+        "checks_run": list(contract.checks_run),
+        "issues": [
+            {
+                "severity": issue.severity,
+                "what": issue.what[:300],
+                "where": issue.where[:200],
+                "why": issue.why[:300],
+            }
+            for issue in contract.issues
+        ],
+    }
+
+
+def _smoke_facts(smoke) -> dict | None:
+    """The smoke run, or None when it never happened.
+
+    None and "it passed" are different answers and the page shows them
+    differently: a smoke run that did not happen is the absence of evidence,
+    never a tick.
+    """
+    if smoke is None:
+        return None
+    return {
+        "ran": smoke.ran,
+        "skipped": smoke.skipped[:300],
+        "entrypoint": smoke.entrypoint,
+        "port": smoke.port,
+        "installed": smoke.installed[:200],
+        "probes": [
+            {
+                "path": getattr(probe, "path", ""),
+                "method": getattr(probe, "method", "GET"),
+                "status": getattr(probe, "status", None),
+                "ok": getattr(probe, "ok", False),
+            }
+            for probe in smoke.probes
+        ],
+        "issues": [
+            {"severity": i.severity, "what": i.what[:300], "where": i.where[:200]}
+            for i in smoke.issues
+        ],
+    }
+
+
+def _verdict_line(outcome, materialized, contract, smoke) -> str:
+    """One line for the terminal: what happened, not how.
+
+    Deliberately the same judgement `report.md` opens with — a run whose nodes
+    all succeeded can still have produced a project that does not run, and the
+    line has to be able to say so.
+    """
+    tokens = sum(
+        (r.usage.prompt_tokens + r.usage.completion_tokens)
+        for r in outcome.results.values()
+        if r.usage is not None
+    )
+    bits = [
+        f"{len(materialized.written)} file(s) written",
+        (
+            f"{len(contract.checks_run)} checks passed"
+            if contract.ok
+            else f"{len(contract.errors)} cross-artifact mismatch(es)"
+        ),
+        f"{tokens:,} tokens",
+    ]
+    if smoke is not None:
+        bits.append(
+            "smoke passed"
+            if smoke.ok
+            else ("smoke failed" if smoke.ran else "smoke skipped")
+        )
+    return "  " + "  ·  ".join(bits)
 
 
 def _execute(
@@ -640,6 +1164,22 @@ def _execute(
     it as the project.
     """
     config = session.config
+
+    # The tables live in the browser now. They are a page of numbers that
+    # changes while it is being printed, and a terminal can only show the state
+    # they were in when the run ended — which is the least interesting moment.
+    # `--tables` puts them back for anyone without a browser open.
+    tables = getattr(args, "tables", False)
+    say = print if tables else _quiet
+
+    progress = ProgressWriter(
+        run_dir=config.run_dir,
+        run_id=config.run_id,
+        task=config.task,
+        live=not config.dry_run,
+    )
+    session.scheduler.progress = progress
+
     mode = (
         "dry run — mock provider, no network"
         if config.dry_run
@@ -647,16 +1187,17 @@ def _execute(
     )
     print(f"Task: {config.task}")
     print(f"Run:  {config.run_id}  ({mode})")
+    print(f"      watch it: {dashboard_url()}")
     if session.restored:
-        print(render_restored(session.restored))
+        say(render_restored(session.restored))
 
     bids = _bid(session, args)
     plan = session.scheduler.plan(bids=bids)
-    print(render_plan(plan, session.graph, explain=getattr(args, "explain", False)))
+    say(render_plan(plan, session.graph, explain=getattr(args, "explain", False)))
 
     outcome = asyncio.run(session.scheduler.run(plan, resume=resume))
-    print(render_outcome(outcome, session.graph))
-    print(render_spend(outcome))
+    say(render_outcome(outcome, session.graph))
+    say(render_spend(outcome))
 
     # Seed summaries the mock cannot produce itself.
     if config.dry_run:
@@ -666,12 +1207,12 @@ def _execute(
 
     report = materialize(config.output_dir, session.graph.nodes, outcome.results)
 
-    print("\nOutput")
-    print("=" * 78)
-    print(f"  {config.output_dir}")
-    print(f"  {len(report.written)} written, {len(report.stubbed)} stubbed")
+    say("\nOutput")
+    say("=" * 78)
+    say(f"  {config.output_dir}")
+    say(f"  {len(report.written)} written, {len(report.stubbed)} stubbed")
     for path, reason in report.rejected:
-        print(f"  ! rejected {path}: {reason}")
+        say(f"  ! rejected {path}: {reason}")
 
     # Do the pieces fit each other? Free, deterministic, and the only check
     # that looks across artifacts rather than at one in isolation.
@@ -682,7 +1223,7 @@ def _execute(
         session.scheduler.blackboard.interface,
         {**(prior or {}), **artifacts_from_results(session.graph.nodes, outcome.results)},
     )
-    print(render_contracts(contract))
+    say(render_contracts(contract))
 
     # The only check that runs the code rather than reading it. Opt-in: every
     # other step treats model output as untrusted data, and this one hands it
@@ -695,7 +1236,7 @@ def _execute(
             session.scheduler.blackboard.interface,
             install=wants_install,
         )
-        print(render_smoke(smoke))
+        say(render_smoke(smoke))
 
     # The same findings, written down. Everything above this line lives in
     # scrollback; the artifacts it describes live on disk indefinitely.
@@ -713,20 +1254,33 @@ def _execute(
         encoding="utf-8",
         newline="\n",
     )
-    print(f"  {report_path}")
+    say(f"  {report_path}")
+    say(render_warnings(outcome.warnings))
 
-    print(render_warnings(outcome.warnings))
+    # Everything the tables held, handed to the page that now holds them. Taken
+    # from the same objects the renderers were given, so the browser and a
+    # `--tables` terminal cannot disagree about what happened.
+    progress.summarise(
+        output_dir=str(config.output_dir),
+        report_path=str(report_path),
+        written=sorted(report.written),
+        stubbed=sorted(report.stubbed),
+        rejected=[{"path": p, "why": why} for p, why in report.rejected],
+        contract=_contract_facts(contract),
+        smoke=_smoke_facts(smoke),
+        warnings=[str(w) for w in outcome.warnings][:40],
+        degraded=sorted(outcome.degraded),
+    )
+    progress.finish("all nodes succeeded" if outcome.all_succeeded else "degraded")
 
+    print(_verdict_line(outcome, report, contract, smoke))
     if outcome.degraded:
         print(
-            f"\n  {len(outcome.degraded)} node(s) degraded. Their work is "
+            f"  {len(outcome.degraded)} node(s) degraded. Their work is "
             f"checkpointed — `llmorch resume {config.run_id}` picks up only "
             "what is missing."
         )
-
-    print("\nRun the result:")
-    print(f"  python {config.output_dir / 'server.py'}")
-    print("  then open http://localhost:8000")
+    print(f"  details: {dashboard_url()}   report: {report_path}")
 
     if history is not None:
         history.record(
@@ -792,6 +1346,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="--smoke, plus a lockfile-pinned dependency install first "
         "(reaches the network; package install scripts stay disabled)",
     )
+    run.add_argument(
+        "--tables",
+        action="store_true",
+        help="print the full tables here as well as publishing them",
+    )
     run.add_argument("--allow-paid", action="store_true")
     run.add_argument("--max-usd", type=float, default=0.0)
     run.add_argument("--max-nodes", type=int, default=10)
@@ -819,6 +1378,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--smoke-install",
         action="store_true",
         help="--smoke, plus a lockfile-pinned dependency install first",
+    )
+    resume.add_argument(
+        "--tables",
+        action="store_true",
+        help="print the full tables here as well as publishing them",
     )
     resume.add_argument("--max-nodes", type=int, default=10)
     resume.add_argument("--concurrency", type=int, default=4)
@@ -853,8 +1417,83 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--smoke-install", action="store_true")
     chat.add_argument("--max-nodes", type=int, default=10)
     chat.add_argument("--concurrency", type=int, default=4)
+    chat.add_argument(
+        "--tables",
+        action="store_true",
+        help="print the full tables here as well as publishing them",
+    )
+    chat.add_argument(
+        "--mode",
+        choices=[m.value for m in mode_module.Mode],
+        default=None,
+        help="chat | agent | crew; skips the question at the start",
+    )
     chat.add_argument("--explain", action="store_true")
     chat.set_defaults(func=cmd_chat, task=None, negotiate="auto")
+
+    configure = sub.add_parser(
+        "configure",
+        aliases=["config"],
+        help="open the setup page in a browser (what a bare `llmorch` does)",
+    )
+    configure.add_argument("--port", type=int, default=CONFIGURE_PORT)
+    configure.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="serve the page but do not open it",
+    )
+    configure.set_defaults(func=cmd_configure, task=None)
+
+    start = sub.add_parser(
+        "start",
+        help="a session using whatever the setup page saved",
+    )
+    start.add_argument(
+        "first",
+        nargs="?",
+        default=None,
+        help="an opening instruction, said for you as the first turn",
+    )
+    start.add_argument("--session", default=None, help="continue a specific session id")
+    start.add_argument(
+        "--continue",
+        dest="continue_",
+        action="store_true",
+        help="continue the most recent session",
+    )
+    start.add_argument(
+        "--live", action="store_true", help="override the saved mode for this session"
+    )
+    start.add_argument(
+        "--mock",
+        action="store_true",
+        help="override the saved mode: mock provider, no network",
+    )
+    start.add_argument(
+        "--tables",
+        action="store_true",
+        help="print the full tables here as well as publishing them",
+    )
+    start.add_argument(
+        "--mode",
+        choices=[m.value for m in mode_module.Mode],
+        default=None,
+        help="chat | agent | crew; skips the question at the start",
+    )
+    start.add_argument("--explain", action="store_true")
+    start.set_defaults(func=cmd_start, task=None, negotiate="auto")
+
+    ask = sub.add_parser(
+        "ask",
+        help="answer a question about a session, building nothing",
+    )
+    ask.add_argument("question")
+    ask.add_argument(
+        "--session", default=None, help="which session (default: the most recent)"
+    )
+    ask.add_argument("--live", action="store_true", help="use real providers")
+    ask.add_argument("--providers", default=DEFAULT_LIVE_PROVIDERS)
+    ask.set_defaults(func=cmd_ask, task=None)
 
     plan = sub.add_parser("plan", help="show the assignment without executing")
     plan.add_argument("task", nargs="?", default=None)
@@ -934,12 +1573,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     argv = list(sys.argv[1:] if argv is None else argv)
 
-    # `llmorch`, `llmorch "build a notes app"`, `llmorch --live` all open a
-    # session. Anything naming a subcommand is untouched, so `run`, `resume`,
-    # `doctor` and the rest behave exactly as they did.
-    if not argv or (
-        argv[0] not in parser.subcommand_names and argv[0] not in ("-h", "--help")
-    ):
+    # `llmorch` on its own opens the setup page: the choice of models and of
+    # live-versus-mock is the thing a person needs to make first, and making it
+    # on the command line means remaking it every time — with a quiet failure
+    # (a session replaying fixtures) as the cost of forgetting.
+    #
+    # `llmorch "build a notes app"` and `llmorch --live` still open a session,
+    # because both name something to do. Anything naming a subcommand is
+    # untouched, so `run`, `start`, `doctor` and the rest behave as they did.
+    if not argv:
+        argv = ["configure"]
+    elif argv[0] not in parser.subcommand_names and argv[0] not in ("-h", "--help"):
         argv = ["chat", *argv]
 
     args = parser.parse_args(argv)

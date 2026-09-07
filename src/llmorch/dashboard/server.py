@@ -124,9 +124,36 @@ def build_server(
     # would spend its whole life inside that one connection, and a second
     # client — another tab, or a curl to check something — would hang until the
     # browser was closed. Found exactly that way.
-    server = ThreadingHTTPServer((host, port), _Handler)
-    server.daemon_threads = True
-    return server
+    #
+    # And not sharing the port. `allow_reuse_address` on Windows lets a second
+    # process bind an address a first is already listening on, with connections
+    # going to whichever wins — so two dashboards disagree about what is
+    # happening and neither is obviously wrong.
+    class _Server(ThreadingHTTPServer):
+        allow_reuse_address = False
+        daemon_threads = True
+
+        def handle_error(self, request, client_address) -> None:
+            # The page polls on a keep-alive connection, so a closed tab is a
+            # reset every few seconds. A traceback for each would bury whatever
+            # the person is watching the dashboard beside.
+            import sys
+            import traceback
+
+            if isinstance(
+                sys.exc_info()[1],
+                (ConnectionResetError, ConnectionAbortedError, BrokenPipeError),
+            ):
+                return
+            traceback.print_exc()
+
+    try:
+        return _Server((host, port), _Handler)
+    except OSError as exc:
+        raise DashboardError(
+            f"port {port} is already in use — a dashboard may already be "
+            f"running at http://{host}:{port} ({exc})"
+        ) from exc
 
 
 def serve(host: str = "127.0.0.1", port: int = DEFAULT_PORT) -> None:

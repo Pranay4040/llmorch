@@ -16,6 +16,7 @@ from typing import Any
 
 from ..config import profiles_path, runs_dir, state_db_path
 from ..engine.checkpoint import list_checkpoints
+from ..engine.progress import PROGRESS_NAME, is_active, read_progress
 from ..negotiate import plancache
 from ..negotiate.profiles import Profiles
 from ..quota.governor import Governor
@@ -93,6 +94,31 @@ def _runs() -> list[dict[str, Any]]:
     return rows
 
 
+def _current_run() -> dict[str, Any] | None:
+    """The most recent run's own published state, if it has one.
+
+    Read from the run directory rather than from the ledger, because the ledger
+    only knows about calls that came back. What a person wants while a build is
+    happening is the node that has not come back yet — which model has it, how
+    long it has been out, and whether it is on its second attempt.
+
+    The newest by run id, and only one: two runs at once share a quota and a
+    ledger, and a page that showed both would have to say which numbers belonged
+    to which without any of the other panels being able to.
+    """
+    root = runs_dir()
+    if not root.is_dir():
+        return None
+
+    for path in sorted(root.glob(f"*/{PROGRESS_NAME}"), reverse=True)[:4]:
+        payload = read_progress(path.parent)
+        if payload is None:
+            continue
+        payload["active"] = is_active(payload)
+        return payload
+    return None
+
+
 def _track_record() -> list[dict[str, Any]]:
     profiles = Profiles.load()
     return [
@@ -133,6 +159,9 @@ def snapshot() -> dict[str, Any]:
     with LedgerStore(state_db_path()) as store:
         return {
             "generated_utc": datetime.now(timezone.utc).isoformat(),
+            # First, because it is the only thing on the page that changes
+            # while somebody is looking at it.
+            "current": _current_run(),
             "quota": _quota(manifest, store),
             "spend": _spend(store),
             "runs": _runs(),

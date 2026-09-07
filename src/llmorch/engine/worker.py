@@ -71,6 +71,9 @@ class WorkerDeps:
     the model is blamed. Bounded: a node whose spec genuinely cannot be met
     would otherwise walk the budget up to the ceiling on every model in turn."""
     review: str = "off"
+    review_model: str = ""
+    """The reviewer a person chose, when they chose one. Honoured only where the
+    cross-vendor rule already allows it — see `pick_reviewer`."""
     """off | code | all — which nodes get a cross-vendor Tier 1 read."""
     max_repairs: int = 1
     """Repair attempts per node. Bounded, or a harsh reviewer and a stubborn

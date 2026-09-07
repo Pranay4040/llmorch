@@ -270,6 +270,7 @@ def pick_reviewer(
     author_model_id: str,
     candidates: list[str],
     prefer_provider: str | None = None,
+    prefer_model: str | None = None,
 ) -> str | None:
     """Choose a reviewer from a different vendor than the author.
 
@@ -287,6 +288,14 @@ def pick_reviewer(
     ]
     if not cross:
         return None
+
+    # A person's choice of reviewer is honoured only where it is *allowed* to be
+    # the reviewer. The cross-vendor rule is not a preference this can outrank:
+    # a same-family reviewer shares the author's blind spots, and self-review in
+    # particular tends to re-approve its own mistake. So the pin filters the
+    # eligible pool rather than replacing it.
+    if prefer_model and prefer_model in cross:
+        return prefer_model
 
     # Prefer the provider with abundant daily requests, so review never eats
     # the scarce budget the critical path depends on.

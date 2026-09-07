@@ -112,16 +112,108 @@ The application this was built for splits a task across models from different
 vendors, assigns each slice by fitness and remaining quota, and writes a
 runnable project folder:
 
+### Quick start
+
+Windows — installs it, puts it on PATH, and leaves a Desktop shortcut:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\setup.ps1
+```
+
+Then, anywhere:
+
 ```bash
-llmorch                                          # a session; the shortest way in
+llmorch          # set up keys and which models to use, in a browser
+llmorch start    # then talk to it
+```
+
+Nothing needs a key to try: `llmorch run "build a notes app"` exercises the whole
+pipeline against a mock provider with no network at all.
+
+### Every way in
+
+```bash
+llmorch                                          # the setup page, in a browser
+llmorch start                                    # a session, using what it saved
 ./llmorch                                        # ...from a checkout, no PATH needed
 llmorch "build a notes app"                      # ...with the first thing said
 llmorch run "build a notes app"                  # mock provider, no network
 llmorch run --live --providers all "build a CLI that converts CSV to markdown"
 llmorch run --smoke "build a notes app"          # ...and then run what it wrote
 llmorch chat                                     # a session, not one shot
+llmorch ask "what serves /api/items?"            # a question about what it built
 llmorch resume <run_id>                          # after a quota wall
 ```
+
+### What happens when you ask for something
+
+One instruction becomes a folder you can run. Every step is either free or is a
+request that had to pass admission control first:
+
+1. **Plan** — one model turns the sentence into a set of nodes (one file each)
+   and an *interface contract*: the routes, pages, data shapes and runtime every
+   node is held to. One request, at HIGH priority, and cached by task text so
+   repeating a build costs nothing.
+2. **Assign** — free. Each node goes to a model by fitness, remaining quota and
+   an even split, or by rotation if you asked for that. A job you pinned goes
+   where you pinned it. (A bidding round can inform this at one request per
+   model, and is skipped when there are more models than nodes — spending
+   fifteen requests to place six is not worth what it buys.)
+3. **Execute** — one request per node, run concurrently. A failure fails over to
+   a *different vendor*, because failure modes correlate within one. A reply cut
+   off mid-file grows the budget and retries rather than blaming the model.
+4. **Verify** — free first: does it parse, is it a stub, did it stop early. Then
+   a second vendor reviews it, which is one more request and is advisory.
+5. **Check the set** — free. Eight checks read the finished files *as a group*:
+   promised pages exist, referenced assets were written, the frontend calls only
+   declared routes, the backend serves every one, modules agree on names and
+   signatures.
+6. **Run it** — optional, and the only step that executes what a model wrote.
+   `--smoke` starts the project and drives the contract against it over HTTP.
+7. **Write it down** — `runs/<id>/report.md`, and the live dashboard.
+
+The contract in step 1 is the whole trick. It is the only thing every model
+sees, and it is why a frontend written by one vendor works against a backend
+written by another without the two ever exchanging a message.
+
+### Set it up in a browser, then talk to it in a terminal
+
+`llmorch` on its own opens a local page: paste your keys, tick which models
+this account may use, and
+choose whether runs are live, reviewed, and started after they are built. It
+saves to `settings.json` beside the ledger, and `llmorch start` runs on that — so
+the flags are chosen once rather than restated every time. The command line still
+overrides them (`llmorch start --mock`), because a stored preference should never
+be the reason you cannot do something once.
+
+It has a tab per mode — **Chat**, **AI agent**, **Crew** — each holding what
+that mode needs and nothing else: who answers questions and whether an answer
+may quote a file you named; which single model writes everything, and the warning
+that review cannot run when there is only one; review depth, node budget, how many
+run at once, and whether the work is divided by fitness or by rotation.
+Choosing a mode there is its own control rather than a side effect of opening
+the tab, so looking at what a mode would do never changes which one you get.
+
+### Choosing who does what
+
+Its **Who does what** tab is where you say which model does which job —
+planner, chat and questions, backend, frontend, styling, docs, glue, reviewer.
+Anything left on *Automatic* is assigned the way it always was: by fitness,
+remaining quota and an even split, which is usually better than a person's
+guess. A pin binds the *assignment* and nothing else — failover still runs its
+whole ladder, because a model that has tripped its circuit breaker is not the
+one you meant to insist on, and a pinned reviewer that shares the author's
+vendor is skipped for that file rather than allowed to review its own family.
+
+That page is the only part of the system that accepts a write, so unlike the
+read-only dashboard it carries a token, refuses a non-loopback `Host`, and will
+only write the key variables the manifest actually declares. Keys go one way: it
+can tell you a key is set and has no endpoint that gives one back. The token is
+kept for the machine rather than minted per launch, so the link keeps working —
+a fresh secret each time turned every bookmark into a dead end, and a stable one
+stops a cross-origin post exactly as well.
+
+### A session, not one shot
 
 `chat` keeps the conversation: the first instruction builds a project, and each
 one after it is planned as a *change* to what already exists, so "now add tags"
@@ -130,7 +222,53 @@ turn remembers is the instructions, the interface contract, and one summary per
 file — never the file contents, because a conversation that pasted its artifacts
 back into the planner would grow every prompt with the project instead of with
 the request. Sessions are saved after every turn; `--continue` picks the last one
-back up.
+back up. A session is named after the first thing you ask it for —
+`20260907-165836-notes-app` — and the slug alone is enough to name it again:
+`llmorch ask --session notes-app "..."`. The timestamp stays in front because it
+is what makes these sort chronologically, which is how "the most recent session"
+is worked out.
+
+### Three kinds of session
+
+**A session asks what kind of session it is**, before anything is said:
+
+```
+How should this session work?
+
+  1  Chat        questions only — nothing gets built
+  2  One agent   a single model plans and writes every file
+  3  A crew      several models split the work and review each other  (default)
+```
+
+None of the three is a separate implementation. Chat is the question lane as a
+standing choice, one agent is every job pinned to one model, and a crew is what
+the system does anyway — which is why each can be described honestly, including
+what it gives up: pin every job to one model and cross-vendor review stops
+happening, because there is no second vendor left to ask.
+
+A mode is a default, not a lock — `/build` still builds inside a chat session.
+`--mode chat|agent|crew` skips the question, the setup page can answer it once
+for good, and a resumed session keeps the mode it was opened in. A
+non-interactive stdin is never prompted.
+
+### Telling an instruction from a question
+
+**Not every line is an instruction.** "what does the server do?" is a question
+and "looks good" is neither, and a session that planned both spent a request to
+be told there was nothing to plan. Which lane a line belongs in is a property of
+the line, so it is decided before anything is spent: a question is answered from
+what the session already knows, an acknowledgement costs nothing at all, and
+anything the classifier does not recognise is an instruction — the old behaviour,
+which is what makes it safe for the rules to stay small. `/ask` and `/build`
+settle the residue by naming the lane outright.
+
+An answer is one request and writes nothing. It is grounded in the same memory a
+plan is made against — the instructions, the contract, one summary per file, and
+who wrote it — plus the contents of any file the question *names*, so the prompt
+still grows with the request rather than with the project. `llmorch ask` reaches
+the same lane from a shell prompt, without opening a session.
+
+### Running what it built
 
 `--smoke` starts the generated project, drives the contract's pages and routes
 against it over HTTP, and reports what came back. How to start it is part of the
@@ -157,6 +295,8 @@ a run that did not come from reading the code — a project whose files all pars
 all pass review, and all agree with each other can still serve every page from
 the wrong directory, and nothing static will say so.
 
+### Checking that the pieces fit each other
+
 Before any of that, eight deterministic checks read the finished artifacts as a
 set rather than one at a time — the pages the contract promised exist, the assets
 and modules they reference were written, the frontend calls only declared routes,
@@ -172,9 +312,52 @@ evenly the work landed, and what the checks and the smoke run found. The
 artifacts stay on disk indefinitely and look equally plausible either way; the
 evidence about them should not be the one part that lives in scrollback.
 
+### Watching a run
+
+**The tables are in the browser, not the terminal.** A run's numbers change
+while it is happening, and a terminal can only show the state they were in when
+it ended — which is the least interesting moment. So a run publishes what it is
+doing to its own directory as it goes, and `llmorch dashboard` shows it live:
+which node each model has right now, how many attempts it is on, tokens as each
+one lands, and what is left of the day. The terminal keeps a verdict and a URL.
+`--tables` puts the full output back for anyone without a browser open.
+
+Two "today" figures appear on that page and they disagree on purpose. The
+run panel's comes from the vendor's own rate-limit headers and is what admission
+control believes; the quota table's is this machine's ledger. Each says which it
+is, because two numbers under one name is how a reader ends up trusting neither.
+
+### Other commands
+
 Supporting commands: `doctor --probe` (verify wire names before depending on
 them), `discover` (ask a key which models it can reach, spending no tokens),
 `quota`, `ledger`, `dashboard` (read-only, loopback only).
+
+`--providers` narrows the roster itself, not just the client registry: a model
+left enabled that nothing can reach is a node assigned to nobody. The same
+narrowing covers a provider that is enabled in `models.yaml` with no key in the
+environment, which is the identical fault through a quieter door.
+
+## What is in this repository
+
+| Path | What lives there |
+|---|---|
+| `src/llmorch/quota/` | The library. Admission control (`governor.py`), the append-only usage ledger (`store.py`), sliding windows and day keys (`windows.py`), self-correcting token estimation (`estimator.py`). Imports nothing from the orchestrator, and a test asserts it. |
+| `src/llmorch/providers/` | One dependency-free client for any OpenAI-shaped endpoint, plus rate-limit header parsing and a deterministic mock that can inject each failure a real free tier produces. |
+| `src/llmorch/registry/` | `models.yaml` loaded and validated — every role chain must span two vendors, every paid provider must declare pricing, every model must fit its provider's per-request ceiling. |
+| `src/llmorch/negotiate/` | Deciding *who does what*: task decomposition, revision, bidding, the assignment reconciler, question-vs-instruction classification, and answering a question. |
+| `src/llmorch/engine/` | Running it: the scheduler, the worker with its failover ladder, cross-vendor review, the two verification tiers, cross-artifact contract checks, materialisation, checkpoints, the smoke run, and live progress. |
+| `src/llmorch/configure/` | The setup page — the only server here that accepts a write. |
+| `src/llmorch/dashboard/` | The read-only window on quota, spend and the run in flight. |
+| `src/llmorch/report/` | Terminal renderers and `report.md`. Recompute nothing, so the file and the screen cannot disagree. |
+| `tests/` | 765 of them, no network, no keys. `conftest.py` unsets every provider key so the suite tests the code and not the machine. |
+| `models.yaml` | The roster: 15 models across 3 vendors, every wire name confirmed with a live call. |
+| `docs/original-plan.md` | The plan this was built from. |
+| `HANDOFF.md` | Current state, what is next, and the invariants not to break — each one learned by getting it wrong against a live API. |
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).
 
 Current state, what is next, and the invariants not to break are in
 [HANDOFF.md](HANDOFF.md). The original 45k plan is in

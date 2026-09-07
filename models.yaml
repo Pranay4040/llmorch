@@ -100,13 +100,20 @@ providers:
       - {kind: rpd, scope: account, value: 50, reserve: 5}
 
   # -------------------------------------------------------------------------
-  # NVIDIA NIM — inactive, and now known to be unusable on this account.
-  # `GET /models` lists 82 models across ten companies (Meta, Mistral, IBM,
+  # NVIDIA NIM — inactive, and still unusable on this account.
+  # `GET /models` lists 81 models across ten companies (Meta, Mistral, IBM,
   # Writer, DeepSeek, Microsoft, Moonshot, OpenAI, Google, 01-ai) — exactly the
-  # diversity this project wanted — but every completion returns
-  # "Function ... Not found for account". A model list is what the platform
-  # serves, not what the key may call. Same story for Cerebras: /models
-  # answered, completions returned "Payment required".
+  # diversity this project wanted — and every completion is refused.
+  #
+  # Re-probed 2026-09-07, and the refusal has *changed*: it used to be
+  # "Function ... Not found for account", and is now "The model ... has reached
+  # its request limit" (with a 404 for deepseek-r1). That is a different fault —
+  # the account can now address the model and has no allowance for it, where
+  # before the model was not addressable at all. Still unusable, but for a
+  # reason that could lapse, so it is worth re-probing rather than deleting.
+  #
+  # Cerebras re-probed the same day: /models still answers with three models and
+  # all three completions return "Payment required to access this resource".
   # One key reaches 100+ models labelled by their real vendor, which is the
   # best fit for genuine multi-company diversity. But NVIDIA publishes no
   # official free-tier numbers, so these values are a conservative guess that
@@ -341,6 +348,185 @@ models:
       review: 0.55
       integration: 0.60
 
+  # -------------------------------------------------------------------------
+  # Free-tier additions, each probed live on 2026-09-07 with one call.
+  #
+  # Five of the eighteen free models the key lists were dropped on the evidence
+  # rather than declared, which is the whole point of probing: `thinkingmachines
+  # /inkling` and `inkling-small` answered 403 (listed, not entitled),
+  # `google/gemma-4-31b-it` and `gemma-4-26b-a4b-it` returned a provider error
+  # on both attempts, and `nvidia/nemotron-3-nano-omni-...-reasoning` returned
+  # a body with no choices in it twice. `nemotron-3.5-content-safety` answered
+  # "User Safety: safe" to a request for a Python function — it is a moderation
+  # classifier, and putting it in a writing chain would spend a request to be
+  # told nothing was unsafe.
+  #
+  # These eight add vendor *diversity*, not capacity: OpenRouter's 50 requests a
+  # day are account-scoped, so every model here draws on the same bucket the
+  # three above already share. What they buy is more distinct vendors for
+  # cross-vendor review to draw on, and a wider spread of strengths.
+  # -------------------------------------------------------------------------
+
+  - id: openrouter/laguna-s
+    provider: openrouter
+    wire_name: poolside/laguna-s-2.1:free
+    context: 262144
+    max_output: 8192
+    quality_prior: 0.58
+    supports_json_schema: true
+    # Poolside builds for code. Answered a trivial prompt in 1.6s with exactly
+    # the two tokens asked for — the only model in this batch that did.
+    role_affinity:
+      planning: 0.45
+      research: 0.40
+      backend: 0.65
+      frontend: 0.60
+      styling: 0.45
+      content: 0.35
+      review: 0.55
+      integration: 0.60
+
+  - id: openrouter/laguna-xs
+    provider: openrouter
+    wire_name: poolside/laguna-xs-2.1:free
+    context: 262144
+    max_output: 8192
+    quality_prior: 0.45
+    supports_json_schema: true
+    # Correct, and took 27.3 seconds to write `def add(a, b)`. Kept because a
+    # slow model is still a vendor review can fall back to, and scored so it is
+    # never the first choice for anything on a critical path.
+    role_affinity:
+      planning: 0.25
+      research: 0.25
+      backend: 0.35
+      frontend: 0.35
+      styling: 0.35
+      content: 0.30
+      review: 0.45
+      integration: 0.30
+
+  - id: openrouter/dots-3-note
+    provider: openrouter
+    wire_name: dots-studio/dots-3-note-preview:free
+    context: 512000
+    max_output: 8192
+    quality_prior: 0.58
+    supports_json_schema: true
+    # 1.6s and clean fenced code. The fastest usable model in this batch.
+    role_affinity:
+      planning: 0.50
+      research: 0.55
+      backend: 0.55
+      frontend: 0.55
+      styling: 0.50
+      content: 0.60
+      review: 0.55
+      integration: 0.50
+
+  - id: openrouter/minimax-m2.7
+    provider: openrouter
+    wire_name: minimax/minimax-m2.7:free
+    context: 196608
+    max_output: 8192
+    quality_prior: 0.55
+    supports_json_schema: true
+    # 14.2s. The previous generation of the m3 already declared above; kept as a
+    # same-vendor fallback rather than a first choice.
+    role_affinity:
+      planning: 0.45
+      research: 0.45
+      backend: 0.50
+      frontend: 0.50
+      styling: 0.45
+      content: 0.50
+      review: 0.50
+      integration: 0.45
+
+  - id: openrouter/ling-flash-fin
+    provider: openrouter
+    wire_name: inclusionai/ling-3.0-flash-fin:free
+    context: 262144
+    max_output: 8192
+    quality_prior: 0.52
+    supports_json_schema: true
+    # Domain-tuned for finance and wrote general Python correctly in 1.3s, so it
+    # is declared on what it did rather than on what it is named. Its sibling
+    # `ling-3.0-flash-sante` is left out: it answered a probe but was never seen
+    # to write code, and this file records what was verified.
+    role_affinity:
+      planning: 0.40
+      research: 0.45
+      backend: 0.50
+      frontend: 0.45
+      styling: 0.40
+      content: 0.45
+      review: 0.45
+      integration: 0.45
+
+  - id: openrouter/lfm-2.5
+    provider: openrouter
+    wire_name: liquid/lfm-2.5-2.6b:free
+    context: 65536
+    max_output: 8192
+    quality_prior: 0.35
+    supports_json_schema: true
+    # 2.6B parameters — by far the smallest thing here. It wrote a one-line
+    # function correctly in 2.5s, which is evidence about one-line functions and
+    # not about a 1,500-token file. Scored to be picked for small work or not at
+    # all.
+    role_affinity:
+      planning: 0.20
+      research: 0.25
+      backend: 0.30
+      frontend: 0.30
+      styling: 0.40
+      content: 0.35
+      review: 0.30
+      integration: 0.30
+
+  - id: openrouter/nemotron-lightning
+    provider: openrouter
+    wire_name: nvidia/nemotron-3.5-lightning:free
+    context: 1000000
+    max_output: 8192
+    min_output_tokens: 1200
+    quality_prior: 0.55
+    supports_json_schema: true
+    # Spent 351 output tokens reasoning its way to `def add(a, b): return a + b`,
+    # and at a 16-token budget returned nothing but the start of that reasoning.
+    # Hence the output floor: the same fault Gemini has, and the same fix. Ask
+    # it for 200 tokens and the thinking eats all of them.
+    role_affinity:
+      planning: 0.55
+      research: 0.50
+      backend: 0.50
+      frontend: 0.45
+      styling: 0.40
+      content: 0.50
+      review: 0.55
+      integration: 0.45
+
+  - id: openrouter/nemotron-super
+    provider: openrouter
+    wire_name: nvidia/nemotron-3-super-120b-a12b:free
+    context: 262144
+    max_output: 8192
+    min_output_tokens: 600
+    quality_prior: 0.58
+    supports_json_schema: true
+    # 11.1s, 65 output tokens, no fence and no preamble. Reasons less than its
+    # lightning sibling but still enough to want a floor under the budget.
+    role_affinity:
+      planning: 0.60
+      research: 0.55
+      backend: 0.55
+      frontend: 0.50
+      styling: 0.45
+      content: 0.55
+      review: 0.60
+      integration: 0.50
+
 # ===========================================================================
 # Role fallback chains
 #
@@ -349,15 +535,19 @@ models:
 # third attempt at the same vendor tends to fail exactly as the first two did.
 # ===========================================================================
 
+# The 2026-09-07 additions sit at the tail of each chain rather than the head:
+# a chain is preference order, and being newly verified is not evidence of being
+# better than a model with a track record. `profiles.json` moves them up on
+# their own if they earn it.
 roles:
-  planning:    [gemini/3.6-flash, groq/gpt-oss-120b, openrouter/nemotron-ultra, openrouter/minimax-m3]
-  research:    [gemini/3.6-flash, openrouter/minimax-m3, groq/gpt-oss-120b]
-  backend:     [groq/gpt-oss-120b, gemini/3.6-flash, openrouter/north-mini-code, groq/qwen3-27b]
-  frontend:    [gemini/3.6-flash, groq/qwen3-27b, openrouter/north-mini-code, groq/gpt-oss-120b]
-  styling:     [groq/qwen3-27b, gemini/3.6-flash, openrouter/minimax-m3, groq/gpt-oss-20b]
-  content:     [gemini/3.6-flash, openrouter/minimax-m3, groq/gpt-oss-120b, groq/gpt-oss-20b]
-  review:      [groq/gpt-oss-120b, gemini/3.6-flash, openrouter/nemotron-ultra, groq/qwen3-27b]
-  integration: [gemini/3.6-flash, groq/gpt-oss-120b, openrouter/north-mini-code, groq/qwen3-27b]
+  planning:    [gemini/3.6-flash, groq/gpt-oss-120b, openrouter/nemotron-ultra, openrouter/minimax-m3, openrouter/nemotron-super, openrouter/dots-3-note]
+  research:    [gemini/3.6-flash, openrouter/minimax-m3, groq/gpt-oss-120b, openrouter/dots-3-note, openrouter/nemotron-super]
+  backend:     [groq/gpt-oss-120b, gemini/3.6-flash, openrouter/north-mini-code, groq/qwen3-27b, openrouter/laguna-s, openrouter/dots-3-note]
+  frontend:    [gemini/3.6-flash, groq/qwen3-27b, openrouter/north-mini-code, groq/gpt-oss-120b, openrouter/dots-3-note, openrouter/laguna-s]
+  styling:     [groq/qwen3-27b, gemini/3.6-flash, openrouter/minimax-m3, groq/gpt-oss-20b, openrouter/dots-3-note, openrouter/lfm-2.5]
+  content:     [gemini/3.6-flash, openrouter/minimax-m3, groq/gpt-oss-120b, groq/gpt-oss-20b, openrouter/dots-3-note, openrouter/nemotron-super]
+  review:      [groq/gpt-oss-120b, gemini/3.6-flash, openrouter/nemotron-ultra, groq/qwen3-27b, openrouter/nemotron-super, openrouter/dots-3-note, openrouter/laguna-xs]
+  integration: [gemini/3.6-flash, groq/gpt-oss-120b, openrouter/north-mini-code, groq/qwen3-27b, openrouter/laguna-s, openrouter/ling-flash-fin]
 
 # ===========================================================================
 # Defaults

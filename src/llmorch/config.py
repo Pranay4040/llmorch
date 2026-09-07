@@ -55,6 +55,18 @@ def profiles_path() -> Path:
 # --------------------------------------------------------------------------
 
 
+def env_path() -> Path:
+    """Where the keys live.
+
+    Overridable for the same reason the ledger and the runs directory are: this
+    file is now *written* as well as read, and a test that exercised that
+    against the developer's own `.env` would be a test that edits their keys.
+    """
+    if override := os.environ.get("LLMORCH_ENV"):
+        return Path(override).expanduser().resolve()
+    return project_root() / ".env"
+
+
 def load_dotenv(path: Path | None = None, *, override: bool = False) -> int:
     """Minimal .env parser. Returns the number of variables set.
 
@@ -64,12 +76,16 @@ def load_dotenv(path: Path | None = None, *, override: bool = False) -> int:
     prefixes, and single/double quoted values. Blank values are skipped, so an
     unfilled placeholder never shadows a real environment variable.
     """
-    env_path = path or (project_root() / ".env")
-    if not env_path.is_file():
+    target = path or env_path()
+    if not target.is_file():
         return 0
 
     count = 0
-    for raw in env_path.read_text(encoding="utf-8").splitlines():
+    # utf-8-sig: a .env saved by Notepad carries a byte-order mark, and it
+    # would otherwise become part of the first variable's name — a key that
+    # is set and unreadable, which reads as a wrong key rather than a
+    # mis-encoded file.
+    for raw in target.read_text(encoding="utf-8-sig").splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
@@ -106,6 +122,78 @@ def get_api_key(env_var: str, *, provider: str) -> str:
 
 def has_api_key(env_var: str) -> bool:
     return bool(os.environ.get(env_var, "").strip())
+
+
+class KeyRejected(ConfigError):
+    """A key value that must not be written. The message never quotes it."""
+
+
+def _reject_bad_key(env_var: str, value: str) -> None:
+    """Refuse anything that would not survive the round trip.
+
+    `.env` is line-oriented and parsed by `load_dotenv` above, so a value
+    carrying a newline would not be one variable with a strange value: it would
+    be that variable plus whatever the next line parsed as. A key arriving from
+    a web form is exactly the input that has to be checked for it.
+    """
+    if not env_var.isidentifier() or not env_var.isascii():
+        raise KeyRejected(f"{env_var!r} is not a valid environment variable name")
+    if len(value) > 512:
+        raise KeyRejected(f"the value for {env_var} is too long to be a key")
+    if any(ch in value for ch in "\r\n\x00") or value != value.strip():
+        raise KeyRejected(
+            f"the value for {env_var} has surrounding space or a line break in it"
+        )
+
+
+def write_env_key(env_var: str, value: str, *, path: Path | None = None) -> Path:
+    """Set one variable in `.env`, leaving every other line as it was.
+
+    Rewritten in place rather than regenerated, because this file is hand-edited
+    and its comments say which provider each key is for and what its free tier
+    allows. Regenerating it from a template would be the tidier implementation
+    and would throw all of that away.
+
+    An empty value clears the variable rather than deleting the line: a blank is
+    already skipped by `load_dotenv`, so the effect is the same and the comment
+    above it survives to say what belongs there.
+
+    The value is never logged, never echoed and never returned. Only the path is.
+    """
+    value = value.strip()
+    _reject_bad_key(env_var, value)
+
+    target = path or env_path()
+    lines = (
+        target.read_text(encoding="utf-8").splitlines() if target.is_file() else []
+    )
+
+    replaced = False
+    for index, raw in enumerate(lines):
+        stripped = raw.strip()
+        if stripped.startswith("#"):
+            continue
+        candidate = stripped.removeprefix("export ").lstrip()
+        name, sep, _ = candidate.partition("=")
+        if sep and name.strip() == env_var:
+            lines[index] = f"{env_var}={value}"
+            replaced = True
+            break
+
+    if not replaced:
+        lines.append(f"{env_var}={value}")
+
+    temp = target.with_name(target.name + ".tmp")
+    temp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Best effort on Windows, where the mode bits are mostly advisory. Worth
+    # doing anyway: on any POSIX machine this file holds every key the account
+    # has, and it is created here rather than by the person who knows that.
+    try:
+        os.chmod(temp, 0o600)
+    except OSError:
+        pass
+    temp.replace(target)
+    return target
 
 
 # --------------------------------------------------------------------------

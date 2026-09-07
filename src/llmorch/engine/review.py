@@ -172,7 +172,10 @@ async def review_artifact(
         if deps.health.is_available(m.id) and m.id in deps.registry
     ]
     reviewer = pick_reviewer(
-        deps.manifest, author_model_id=author_model_id, candidates=pool
+        deps.manifest,
+        author_model_id=author_model_id,
+        candidates=pool,
+        prefer_model=getattr(deps, "review_model", "") or None,
     )
     if reviewer is None:
         return None

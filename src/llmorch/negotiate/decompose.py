@@ -614,15 +614,21 @@ async def revise(
     )
 
 
-def pick_planner(manifest: Manifest, candidates: list[str]) -> str | None:
+def pick_planner(
+    manifest: Manifest, candidates: list[str], *, prefer: str | None = None
+) -> str | None:
     """Whoever is best at planning and is still available.
 
     Uses the declared planning affinity rather than a hardcoded name, so adding
-    a stronger planner to the manifest is enough to change who plans.
+    a stronger planner to the manifest is enough to change who plans — unless a
+    person named one, in which case that is the answer as long as it can still
+    be called.
     """
     eligible = [m for m in candidates if m in {x.id for x in manifest.enabled_models}]
     if not eligible:
         return None
+    if prefer and prefer in eligible:
+        return prefer
     return max(
         eligible,
         key=lambda m: (

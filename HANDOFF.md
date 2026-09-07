@@ -1,8 +1,8 @@
 # llmorch — handoff
 
-**State:** M0–M6 done, plus the smoke run. 563 tests pass, 1 skipped on Windows
-(a symlink test needing admin). Published at github.com/Pranay4040/llmorch,
-tagged `v0.1.0`.
+**State:** M0–M6 done, plus the smoke run, the question lane, the setup page, live run tracking per-job model choice and the three session modes. 743 tests pass,
+1 skipped on Windows (a symlink test needing admin). Published at
+github.com/Pranay4040/llmorch, tagged `v0.1.0`.
 
 Two things in one repo:
 
@@ -18,16 +18,19 @@ Two things in one repo:
 ## Run it
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q                  # 563 tests, no network
+.venv/Scripts/python.exe -m pytest -q                  # 743 tests, no network
 .venv/Scripts/python.exe -m llmorch run "build a notes app"        # mock, offline
 .venv/Scripts/python.exe -m llmorch run --smoke "<task>"          # ...then run the result
 .venv/Scripts/python.exe -m llmorch run --smoke-install "<task>"  # ...installing its deps first
 .venv/Scripts/python.exe -m llmorch run --live --providers all "<task>"
-llmorch.cmd                                            # a session — the short way in
+.venv/Scripts/python.exe -m llmorch configure          # the setup page, in a browser
+.venv/Scripts/python.exe -m llmorch start             # a session, on what it saved
+llmorch.cmd                                            # the setup page — the short way in
 .venv/Scripts/llmorch.exe                              # ...same thing, once PATH is set
 .venv/Scripts/llmorch.exe "build a notes app"          # ...with the first thing said
 .venv/Scripts/python.exe -m llmorch chat               # a session, not one shot
 .venv/Scripts/python.exe -m llmorch chat --continue    # ...pick the last one back up
+.venv/Scripts/python.exe -m llmorch ask "what does server.js do?"  # ask, don't build
 .venv/Scripts/python.exe -m llmorch resume <run_id>    # after a quota wall
 .venv/Scripts/python.exe -m llmorch doctor --probe     # verify wire names live
 .venv/Scripts/python.exe -m llmorch discover           # what each key can reach
@@ -47,13 +50,13 @@ Linux (3.11, 3.13) and Windows (3.12), then does a full offline demo run with
 `--smoke`. Everything it does is offline, so CI needs no secrets and never
 spends quota.
 
-## Roster (verified live 2026-09-01)
+## Roster (verified live 2026-09-01; OpenRouter additions 2026-09-07)
 
 | Vendor | Models | Real limits |
 |---|---|---|
 | Groq | gpt-oss-120b, gpt-oss-20b, qwen3-27b | 1,000 req/day, 8,000 TPM — **from its own headers** |
 | Gemini | 3.6-flash | 20 req/**minute** — from a 429 body. Daily figure unverified |
-| OpenRouter | minimax-m3, nemotron-ultra, north-mini-code | free tier; limits estimated |
+| OpenRouter | minimax-m3, nemotron-ultra, north-mini-code, laguna-s, laguna-xs, dots-3-note, minimax-m2.7, ling-flash-fin, lfm-2.5, nemotron-lightning, nemotron-super | free tier; **50 req/day account-scoped**, so more models here is diversity, not capacity |
 
 ---
 
@@ -73,12 +76,14 @@ Ordered by value. Issues #1–#4 are filed on GitHub.
    compared against the delta nodes and the existing backend files; an unstaffed
    promise is then caught for free, rather than after the whole change is paid
    for.
-2. **Telling an instruction from a remark.** `llmorch chat` plans every line as
-   a change, so "what does this do?" or "looks good" spends a planning request
-   before anything can notice it asked for nothing. The planner answering with
-   zero nodes is handled — the turn says "nothing to change" and records it —
-   but the request is spent by then, and against 250 a day that is the cost
-   worth removing.
+2. **Planning and bidding are not on the ledger.** `decompose`, `revise` and
+   `collect_bids` commit to the governor and observe the estimator, but write no
+   `UsageEvent` — only execution, review, repair, doctor and now `answer` do. So
+   `restore_governor` under-counts the day by every planning request a previous
+   process made, which is the one thing the ledger exists to prevent. The fix is
+   the four-line `_record` that `answer.py` already carries; what makes it worth
+   care rather than a copy-paste is that `make_event` wants a `node_id` and a
+   plan has none, so the column has to mean "not a node" rather than "unknown".
 3. **Arity agreement in JavaScript** (#1, the half still open). Routes, imports
    and imported names now work for JS and Go; what `check_python_calls` does and
    nothing else can is compare *signatures*. `ast` gives Python exact ones, and
@@ -104,6 +109,180 @@ Ordered by value. Issues #1–#4 are filed on GitHub.
 
 Each was learned by getting it wrong against a live API.
 
+- **Round robin is not a better assignment, it is a different one.** Fitness
+  weighs affinity, track record and remaining quota, then caps any one model's
+  share; rotation ignores all of that and spreads per-minute token pressure
+  across more vendors, which is the ceiling that actually stalls a run. The
+  reconciler says out loud that it did not consult the track record, because a
+  plan that looks worse for a reason nobody stated reads as a regression.
+- **Rotation still only offers a model that can serve the node.** The cursor
+  advances over the *feasible* options per node and is global rather than
+  per node, or every node would start from the same model and the rotation
+  would not rotate. Pins are untouched: a pinned role has one option, so there
+  is nothing to rotate through.
+- **Neither local server may share its port.** `HTTPServer` sets
+  `allow_reuse_address`, which on POSIX only skips TIME_WAIT and on Windows lets
+  a *second* process bind an address a first is already listening on — with
+  connections going to whichever wins. Two setup servers were live on 8788 at
+  once and the older one answered a link the newer had just printed, which
+  surfaces as "missing or wrong token" against a URL that is visibly correct.
+  Both servers now refuse the bind and say what is already there.
+- **The setup token is kept, not minted per launch.** A fresh secret each time is
+  stronger and made every bookmark and reopened tab a dead end. A stable secret
+  stops a cross-origin post exactly as well; what it does not stop is a local
+  process reading `configure-token`, and such a process can already read `.env`.
+  A refused link now gets a page explaining itself rather than one line of text.
+- **A closed browser tab is not an error.** `socketserver` prints a traceback
+  when a client drops a keep-alive connection, which the dashboard's five-second
+  poll makes routine — fifteen lines into the middle of whatever the person was
+  reading in that terminal. Both servers swallow connection resets and nothing
+  else.
+- **Opening a tab is not choosing.** Each mode tab carries its own "always
+  use this mode / ask me at the start" control, because a tab that selected the
+  mode by being opened would mean you could not look at what a mode does without
+  changing which one you get.
+- **A control shown twice has one source.** The answering model appears on both
+  *Who does what* and *Chat*; both are filled by `fillRolePicker` from the same
+  data and kept in step by `mirrorRole`, rather than being two places that
+  separately remember the same fact.
+- **An answer quoting a file is the only path by which what you built reaches a
+  provider.** `answer_reads_files` is on by default because grounding beats
+  inference, and exists at all because that sentence is worth being able to act
+  on.
+- **The three session modes are settings, not implementations.** Chat is the
+  question lane as a standing choice, one agent is every job pinned at once, and
+  a crew is the default behaviour. Adding a fourth mode should mean finding
+  another setting of the same machinery, not another code path.
+- **A mode says what it gives up.** One agent cannot have cross-vendor review —
+  `pick_reviewer` requires a different vendor than the author and there is not
+  one — so the menu says so before the choice rather than leaving it to be
+  inferred from a report with no review section.
+- **Nobody is asked who is not there to answer.** The mode prompt checks
+  `stdin.isatty()` first. A menu printed at a pipe would consume the first line
+  of input as the answer to a question the pipe never saw, which is exactly what
+  happened the first time — the whole test suite failed on it.
+- **A session is named once, before anything of it is on disk.** The id is a
+  directory name, a checkpoint key and the `run_id` on every ledger row the
+  session produces, so the one safe moment to name it is the first instruction —
+  when none of those exist yet. `Conversation.name_for` refuses after that
+  rather than renaming and orphaning all three.
+- **The timestamp stays in front of the slug.** `latest_session`,
+  `resume --list` and the dashboard's run list all order runs by the directory
+  name and nothing else, so the prefix has to stay fixed-width and sortable. The
+  slug is for the reader; the prefix is load-bearing.
+- **A bigger roster does not mean a bigger allowance, and can mean less
+  negotiation.** OpenRouter's 50 requests a day are account-scoped, so the eight
+  models added on 2026-09-07 share one bucket with the three that were already
+  there — what they buy is vendor diversity for review and failover, not
+  throughput. And `should_bid` skips the bidding round when there are more
+  models than nodes, so a 15-model roster retires it under `auto` for any
+  normal-sized graph. Both are the right behaviour and neither is obvious.
+- **A newly verified model is not a better model.** The 2026-09-07 additions sit
+  at the tail of every chain and score below the incumbents, so the default
+  assignment did not move. They are reachable through failover, through
+  cross-vendor review, and through a pin — and `profiles.json` promotes them on
+  their own if they earn it. Raising their priors to make them get picked would
+  be inventing the evidence the priors are supposed to record.
+- **A pin binds the assignment and nothing else.** Choosing a model for a job
+  overrides the reconciler's choice for that role and leaves every other
+  mechanism intact: failover still runs its whole ladder, since a model that has
+  tripped its circuit breaker is not the one anybody meant to insist on, and
+  `pick_reviewer` filters a review pin through the cross-vendor rule rather than
+  letting it outrank it. Enforced structurally — a pinned node is scored against
+  one model, so the 2-opt swap pass has nothing to trade it into.
+- **A pin that cannot be honoured falls back out loud.** Not in the roster, or
+  too small an output ceiling for the node: the automatic choice takes over and
+  the run says which pin it could not use. Degrading a node to honour a
+  preference literally is a worse answer to "I prefer this model" than doing the
+  work with a note attached.
+- **Every chooser reads the pins, not just the reconciler.** Three jobs are
+  never carried by a node — the planner, the answerer and the reviewer — and
+  wiring only the reconciler left the two most visible ones (chat and planning)
+  silently unpinnable. Found by pinning them and watching the affinity win.
+- **A run's numbers belong in the browser, because they move.** The terminal
+  printed five tables describing the state everything was in when the run
+  ended. A run now publishes `runs/<id>/progress.json` as it goes — the same
+  file-and-poll shape the checkpoint already established, since the dashboard is
+  a different process — and the terminal keeps a verdict line and a URL.
+  `--tables` restores the old output.
+- **A node in flight reports no tokens.** The governor reserves on an estimate
+  and reconciles on commit, so a node that has not come back has a budget and
+  not a bill. Publishing the estimate as spend would show a total that walks
+  backwards when the wave lands, which is the sort of number people stop
+  trusting.
+- **Nothing writes "finished" on a dead run's behalf.** The progress file is all
+  a killed process leaves behind, so a run is *active* only while its file is
+  moving. The staleness window is 90s, because a node waiting out a per-minute
+  rate limit is working, and calling that stopped misreports the most
+  interesting moment there is.
+- **Monitoring may never fail the run it describes.** Every write is wrapped and
+  every headroom reading is guarded; a progress file that cannot be written is
+  silence, not an exception.
+- **The two "today" figures on the dashboard disagree on purpose, and each says
+  which it is.** The run panel's comes from the vendor's rate-limit headers —
+  fact, and what admission control believes — while the quota table's is the
+  ledger replay. Found by watching them differ by nine on one screen with
+  nothing on the page to explain it, which is how a reader learns to trust
+  neither.
+- **The setup page is the only thing here that accepts a write, and it is
+  guarded as one.** The dashboard's header states that being read-only is *why*
+  it needs no authentication; that argument does not extend to a page which
+  saves settings and writes an API key, so `configure` mints a token at launch,
+  requires it on every request, and refuses a non-loopback `Host`. Binding to
+  127.0.0.1 alone is not enough — a hostile name resolving there is same-origin
+  as far as a browser is concerned, and same-origin policy only stops an
+  attacker *reading* the reply, which somebody writing a key does not need.
+- **Keys go one way through it.** `GET /api/config` reports whether each key is
+  set; nothing returns one. And only the variables a declared provider names can
+  be written, or the endpoint is a way to put arbitrary variables into a file a
+  shell may later source.
+- **Read every file on this machine as `utf-8-sig`.** Notepad and PowerShell's
+  `Set-Content -Encoding utf8` both write a byte-order mark. In `settings.json` a
+  BOM made `json.loads` fail on a perfect file and the roster silently widened
+  back to every model; in `.env` it becomes part of the first variable's *name*,
+  which reads as a wrong key rather than a mis-encoded file. Found by saving
+  settings from PowerShell and watching Gemini reappear in an assignment that
+  had excluded it.
+- **A settings file that cannot be read is reported, not just replaced.**
+  Falling back to the defaults is right — configuration must never be why a
+  build cannot start — but a file that fails to parse looks exactly like a file
+  nobody wrote, and one of those is a configuration somebody made and is not
+  getting.
+- **The roster is narrowed to what can actually be called, before anything is
+  built on it.** `--providers groq` used to narrow only the client registry, so
+  the assignment still handed a node to Gemini and the run died looking for a
+  provider that was never built — after the plan was printed and the planning
+  request already spent. A provider enabled in `models.yaml` with no key in the
+  environment is the same fault through a quieter door, so `restricted_to`
+  covers both. Disabling a vendor is a state the manifest is *designed* to be
+  valid in, which is why `_validate` checks the declared chain rather than the
+  enabled subset.
+- **The line decides the lane, and the default is a build.** A question is
+  answered, an acknowledgement costs nothing, and anything unrecognised is an
+  instruction — which is the behaviour that was there before, so the classifier
+  is never worse than what it replaced. The two mistakes are not symmetrical:
+  reading an instruction as a question spends one request and builds nothing;
+  reading a question as an instruction is the old bug. `/ask` and `/build` exist
+  so the rules can stay small instead of growing a case per phrasing.
+- **A question grows the prompt with the request, never with the project.** The
+  same reason a conversation remembers summaries rather than file contents. What
+  an answer may quote is the files the question *names* — naming one is part of
+  the request — and against Groq's ~3,100 tokens of prompt headroom even that is
+  fitted before the call, dropping the largest excerpt first. A question that
+  does not fit is shortened, never refused: an answer from summaries is worse
+  than an answer from the file and much better than `UNSERVABLE`.
+- **An answer runs at NORMAL priority and lands in the ledger.** Planning is HIGH
+  because the run depends on it and that is what the reserve is for; nothing
+  depends on a question. And it is a real request against a real daily
+  allowance, so a run that did not write it down would leave tomorrow's process
+  believing it still holds that quota.
+- **The suite is isolated from `.env`.** `main` calls `load_dotenv`, so any test
+  that ran the CLI used to copy the developer's real keys into the process, and
+  every later test that described a keyless provider was describing a machine
+  with the *other* keys still set. It passed in CI, which has no `.env`, and
+  failed on the machine that had one. `tests/conftest.py` unsets every
+  `*_API_KEY` per test; a suite that is green only where the secrets are absent
+  is testing the machine.
 - **`UNSERVABLE` ≠ `WAIT` ≠ `EXHAUSTED_TODAY`.** Too big to ever fit, busy for
   seconds, and gone until midnight are three different answers. Collapsing any
   two writes off a healthy model.

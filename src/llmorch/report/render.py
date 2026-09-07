@@ -224,8 +224,14 @@ def render_resume_list(checkpoints: "list[Checkpoint]") -> str:
         lines.append("  (no checkpoints yet)")
         return "\n".join(lines)
 
-    lines.append(f"  {'run':<24} {'done':>6} {'left':>6}  {'blocked until':<26} task")
-    lines.append("  " + "-" * 74)
+    # Sized to the longest id actually present rather than to a constant: a run
+    # is named after what it was asked to build, so the width is a property of
+    # the runs on this machine and not of the format.
+    width = max(24, *(len(b.run_id) for b in checkpoints))
+    lines.append(
+        f"  {'run':<{width}} {'done':>6} {'left':>6}  {'blocked until':<26} task"
+    )
+    lines.append("  " + "-" * (width + 50))
 
     for book in checkpoints:
         left = len(book.unfinished)
@@ -234,7 +240,7 @@ def render_resume_list(checkpoints: "list[Checkpoint]") -> str:
         if book.is_complete:
             when = "complete"
         lines.append(
-            f"  {book.run_id:<24} {len(book.completed):>6} {left:>6}  "
+            f"  {book.run_id:<{width}} {len(book.completed):>6} {left:>6}  "
             f"{when:<26} {book.task[:24]}"
         )
     return "\n".join(lines)
