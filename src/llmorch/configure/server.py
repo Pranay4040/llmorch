@@ -5,11 +5,17 @@ read-only, so a page that can only look needs no threat model. This server can
 save settings and write an API key into `.env`, so that argument does not cover
 it and three things are enforced here instead.
 
-**A token, minted per launch.** It is in the URL the browser is opened with, and
-every request must carry it. Without one, a page on any other origin could post
-to `http://127.0.0.1:8788/api/keys` while this is running — the browser would
-send the request happily, and same-origin policy only stops it *reading* the
-reply, which an attacker writing a key does not need.
+**A token, kept for this machine.** It is in the URL the browser is opened with,
+and every request must carry it. Without one, a page on any other origin could
+post to `http://127.0.0.1:8788/api/keys` while this is running — the browser
+would send the request happily, and same-origin policy only stops it *reading*
+the reply, which an attacker writing a key does not need.
+
+It was minted per launch to begin with, and that was wrong for a reason worth
+recording: it made every bookmark and every reopened tab into a dead end. A
+stable secret stops a cross-origin post exactly as well as a fresh one, and the
+thing it does not stop — a local process reading the token file — is a process
+that can already read `.env`. See `load_or_create_token`.
 
 **A loopback `Host`.** The socket binds to 127.0.0.1, but binding is not enough
 on its own: a hostile name resolving to 127.0.0.1 makes a cross-origin page
@@ -28,13 +34,23 @@ surface; spending quota is not, and `llmorch start` is a terminal away.
 from __future__ import annotations
 
 import json
+import os
+import re
 import secrets
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 from .. import settings as settings_module
-from ..config import KeyRejected, env_path, has_api_key, load_dotenv, write_env_key
+from ..config import (
+    KeyRejected,
+    env_path,
+    has_api_key,
+    load_dotenv,
+    state_db_path,
+    write_env_key,
+)
 from ..registry.manifest import load_manifest
 from .page import PAGE
 
@@ -90,8 +106,86 @@ class ConfigureError(RuntimeError):
     pass
 
 
+# A browser asked for a page, so it gets one. The old reply was a line of plain
+# text telling somebody to find a URL they no longer had, which is a dead end
+# reached by doing something reasonable.
+STALE_LINK = """<!doctype html>
+<meta charset="utf-8">
+<title>llmorch setup — wrong link</title>
+<style>
+  body { background:#0f1115; color:#e6e9ef; margin:0; padding:48px 24px;
+         font:14px/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  @media (prefers-color-scheme: light) { body { background:#f7f8fa; color:#12151b; } }
+  main { max-width: 640px; margin: 0 auto; }
+  h1 { font-size: 18px; margin: 0 0 14px; }
+  p { color:#8b93a3; }
+  code { border:1px solid #242a34; border-radius:4px; padding:1px 6px; }
+</style>
+<main>
+  <h1>This link is missing its token.</h1>
+  <p>
+    The setup page will only answer a URL that carries the token for this
+    machine, because it can write API keys and any other page in your browser
+    could otherwise post to it.
+  </p>
+  <p>
+    Run <code>llmorch</code> in a terminal and open the URL it prints. That link
+    now stays the same, so this one will keep working once you have used it.
+  </p>
+</main>
+"""
+
+
+TOKEN_NAME = "configure-token"
+_TOKEN_SHAPE = re.compile(r"^[A-Za-z0-9_-]{20,128}$")
+
+
 def new_token() -> str:
     return secrets.token_urlsafe(24)
+
+
+def token_path() -> Path:
+    """Beside the ledger and the settings, not in the checkout."""
+    return state_db_path().parent / TOKEN_NAME
+
+
+def load_or_create_token(path: Path | None = None) -> str:
+    """The token for this machine, minted once and kept.
+
+    It began as a fresh secret per launch, which is stronger and was wrong: a
+    bookmarked page, a reopened tab, or simply restarting the server left you
+    with a URL that no longer worked and a line of text telling you to find a
+    URL you no longer had. That is a dead end reached by doing something
+    reasonable.
+
+    Keeping it costs little that matters. What the token defends against is
+    another *web page* posting to this port — CSRF, and a hostile name resolving
+    to 127.0.0.1 — and a stable secret stops that exactly as well as a fresh
+    one. The threat it does not stop is a local process reading the file, and
+    such a process can already read `.env`, which holds the keys themselves.
+
+    A file that is missing, unreadable, or does not look like a token is
+    replaced rather than trusted.
+    """
+    target = path or token_path()
+    try:
+        existing = target.read_text(encoding="utf-8").strip()
+        if _TOKEN_SHAPE.match(existing):
+            return existing
+    except OSError:
+        pass
+
+    token = new_token()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(token, encoding="utf-8")
+        # Advisory on Windows, real everywhere else, and cheap in both places.
+        os.chmod(target, 0o600)
+    except OSError:
+        # A token that cannot be saved still works for this run; the URL just
+        # stops being stable, which is where this came in.
+        pass
+    return token
 
 
 def snapshot() -> dict[str, Any]:
@@ -213,11 +307,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(403, "text/plain", b"loopback only")
             return False
         if not self._authorised():
-            self._send(
-                401,
-                "text/plain",
-                b"missing or wrong token; open the URL llmorch printed",
-            )
+            self._send(401, "text/html; charset=utf-8", STALE_LINK.encode("utf-8"))
             return False
         return True
 
@@ -306,6 +396,41 @@ class _Handler(BaseHTTPRequestHandler):
         return
 
 
+class _Server(ThreadingHTTPServer):
+    """Threading, and refusing to share a port.
+
+    `HTTPServer` sets `allow_reuse_address`, which on POSIX only skips
+    TIME_WAIT. On Windows it means something else entirely: a *second* process
+    may bind an address another process is already listening on, and which of
+    them a connection reaches is arbitrary.
+
+    That is not theoretical here. Two `llmorch` setup servers were live on 8788
+    at once, and the older one answered a link the newer one had just printed —
+    which surfaces as "missing or wrong token" against a URL that is, as far as
+    anyone can see, the right one. Refusing the bind turns that into a sentence
+    saying it is already running.
+    """
+
+    allow_reuse_address = False
+    daemon_threads = True
+
+    def handle_error(self, request, client_address) -> None:
+        """A browser hanging up is not an error worth a traceback.
+
+        `socketserver` prints fifteen lines to stderr when a client closes a
+        keep-alive connection, which on this page happens every time a tab is
+        closed or reloaded — landing in the middle of whatever the person was
+        reading in that terminal. Anything else still gets printed.
+        """
+        import sys
+        import traceback
+
+        if isinstance(sys.exc_info()[1], (ConnectionResetError, ConnectionAbortedError,
+                                          BrokenPipeError)):
+            return
+        traceback.print_exc()
+
+
 def build_server(
     host: str = "127.0.0.1", port: int = DEFAULT_PORT, *, token: str
 ) -> ThreadingHTTPServer:
@@ -318,9 +443,14 @@ def build_server(
         raise ConfigureError("refusing to serve without a token")
 
     handler = type("_BoundHandler", (_Handler,), {"token": token})
-    server = ThreadingHTTPServer((host, port), handler)
-    server.daemon_threads = True
-    return server
+    try:
+        return _Server((host, port), handler)
+    except OSError as exc:
+        raise ConfigureError(
+            f"port {port} is already in use — llmorch setup may already be "
+            f"running. Open http://{host}:{port}/?t=<token> in the terminal "
+            f"that started it, or use --port to run a second one ({exc})"
+        ) from exc
 
 
 def serve(
@@ -330,13 +460,23 @@ def serve(
     open_browser: bool = True,
 ) -> None:
     """Run until interrupted, opening the page on the way up."""
-    token = new_token()
-    httpd = build_server(host, port, token=token)
+    token = load_or_create_token()
+    try:
+        httpd = build_server(host, port, token=token)
+    except ConfigureError as exc:
+        # The token is the same one the other instance is using, so the link
+        # below is the one that works — which is only true because it is kept
+        # rather than minted per launch.
+        print(str(exc))
+        print("\n  if it is already running, this is its link:")
+        print(f"  http://{host}:{port}/?t={token}")
+        return
     bound = httpd.server_address
     url = f"http://{bound[0]}:{bound[1]}/?t={token}"
 
     print(f"llmorch setup on {url}")
     print("  loopback only; the token in that URL is what lets it save.")
+    print("  the same link works next time — it is kept, not minted per run.")
     print("  when you are done here:  llmorch start")
 
     if open_browser:

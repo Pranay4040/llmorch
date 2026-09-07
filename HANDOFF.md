@@ -109,6 +109,23 @@ Ordered by value. Issues #1–#4 are filed on GitHub.
 
 Each was learned by getting it wrong against a live API.
 
+- **Neither local server may share its port.** `HTTPServer` sets
+  `allow_reuse_address`, which on POSIX only skips TIME_WAIT and on Windows lets
+  a *second* process bind an address a first is already listening on — with
+  connections going to whichever wins. Two setup servers were live on 8788 at
+  once and the older one answered a link the newer had just printed, which
+  surfaces as "missing or wrong token" against a URL that is visibly correct.
+  Both servers now refuse the bind and say what is already there.
+- **The setup token is kept, not minted per launch.** A fresh secret each time is
+  stronger and made every bookmark and reopened tab a dead end. A stable secret
+  stops a cross-origin post exactly as well; what it does not stop is a local
+  process reading `configure-token`, and such a process can already read `.env`.
+  A refused link now gets a page explaining itself rather than one line of text.
+- **A closed browser tab is not an error.** `socketserver` prints a traceback
+  when a client drops a keep-alive connection, which the dashboard's five-second
+  poll makes routine — fifteen lines into the middle of whatever the person was
+  reading in that terminal. Both servers swallow connection resets and nothing
+  else.
 - **Opening a tab is not choosing.** Each mode tab carries its own "always
   use this mode / ask me at the start" control, because a tab that selected the
   mode by being opened would mean you could not look at what a mode does without

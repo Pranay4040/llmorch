@@ -485,3 +485,80 @@ def test_the_page_has_a_tab_for_each_mode():
     # Selecting a mode is its own control, so opening a tab to look at what a
     # mode would do does not change which one you get.
     assert 'id="pick-chat"' in PAGE and "Always use this mode" in PAGE
+
+
+# ==========================================================================
+# The link has to keep working
+# ==========================================================================
+
+
+def test_the_token_is_the_same_next_time(tmp_path):
+    """It was minted per launch to begin with, which turned every bookmark and
+    every reopened tab into a dead end."""
+    from llmorch.configure.server import load_or_create_token
+
+    first = load_or_create_token()
+    assert load_or_create_token() == first
+    assert (tmp_path / "configure-token").read_text(encoding="utf-8") == first
+
+
+def test_a_token_file_that_is_not_a_token_is_replaced_not_trusted(tmp_path):
+    from llmorch.configure.server import load_or_create_token
+
+    (tmp_path / "configure-token").write_text("nope", encoding="utf-8")
+    token = load_or_create_token()
+
+    assert token != "nope"
+    assert len(token) >= 20
+
+
+def test_a_token_that_cannot_be_saved_still_serves_this_run(tmp_path, monkeypatch):
+    """The URL stops being stable, which is where this came in — but the run
+    itself must not fail over somewhere to put a file."""
+    from llmorch.configure import server as configure_server
+
+    def refuse(*_args, **_kwargs):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(configure_server.Path, "write_text", refuse)
+    assert len(configure_server.load_or_create_token()) >= 20
+
+
+def test_a_wrong_token_gets_a_page_rather_than_a_dead_end(site):
+    """A browser asked for a page. The old reply was a line of plain text
+    telling somebody to find a URL they no longer had."""
+    base, _ = site
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        _get(f"{base}/?t=aStaleTokenFromAnEarlierRun")
+
+    assert excinfo.value.code == 401
+    body = excinfo.value.read().decode("utf-8")
+    assert "<title>" in body
+    assert "llmorch" in body
+    # It must not hand out the answer it is refusing.
+    assert "aStaleTokenFromAnEarlierRun" not in body
+
+
+def test_the_refusal_never_carries_the_real_token(site):
+    base, token = site
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        _get(f"{base}/api/config")
+
+    assert token not in excinfo.value.read().decode("utf-8")
+
+
+def test_a_second_server_refuses_the_port_rather_than_racing_for_it(site):
+    """`allow_reuse_address` on Windows lets a second process bind an address a
+    first is already listening on, with connections going to whichever wins. Two
+    setup servers were live on 8788 at once and the older one answered a link
+    the newer had just printed — which reads as a wrong token on a URL that is,
+    as far as anyone can see, the right one."""
+    from llmorch.configure.server import build_server, new_token
+
+    base, _ = site
+    port = int(base.rsplit(":", 1)[1])
+
+    with pytest.raises(ConfigureError) as excinfo:
+        build_server("127.0.0.1", port, token=new_token())
+
+    assert "already in use" in str(excinfo.value)
