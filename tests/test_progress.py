@@ -348,3 +348,28 @@ def test_a_run_leaves_its_progress_behind_for_the_dashboard(tmp_path, monkeypatc
     assert current["active"] is False
     assert current["summary"]["contract"]["ok"] is True
     assert current["totals"]["settled"] == current["totals"]["nodes"]
+
+
+def test_a_probe_that_answered_is_not_published_as_a_failure():
+    """`Probe` records what came back and leaves the judgement to the report's
+    issues. Reading an `ok` field it does not have made every 200 a failure, and
+    the dashboard painted a passing smoke run entirely red."""
+    from llmorch import __main__ as cli
+    from llmorch.engine.smoke import Probe, SmokeReport
+
+    report = SmokeReport(
+        ran=True,
+        entrypoint="server.py",
+        port=8000,
+        probes=[
+            Probe(method="GET", path="/", status=200),
+            Probe(method="POST", path="/api/notes", status=201),
+            Probe(method="GET", path="/missing", status=404),
+            Probe(method="GET", path="/dead", status=None, detail="connection refused"),
+        ],
+    )
+
+    facts = cli._smoke_facts(report)
+    verdicts = {p["path"]: p["ok"] for p in facts["probes"]}
+
+    assert verdicts == {"/": True, "/api/notes": True, "/missing": False, "/dead": False}

@@ -178,6 +178,11 @@ written by another without the two ever exchanging a message.
 
 ### Set it up in a browser, then talk to it in a terminal
 
+![The setup page's Crew tab: a tab strip of Keys, Models, Who does what, Chat, AI
+agent, Crew and Runs; the Crew tab showing whether to always use this mode or be
+asked each session, how work is divided, review depth, and the node and
+concurrency budgets](docs/images/setup-crew.png)
+
 `llmorch` on its own opens a local page: paste your keys, tick which models
 this account may use, and
 choose whether runs are live, reviewed, and started after they are built. It
@@ -195,6 +200,11 @@ Choosing a mode there is its own control rather than a side effect of opening
 the tab, so looking at what a mode would do never changes which one you get.
 
 ### Choosing who does what
+
+![The Who does what tab: one dropdown per job — backend, docs and text, frontend,
+glue and setup, planner, chat and questions, reviewer, styling — each with a
+sentence describing the job, most left on Automatic with backend pinned to
+groq/gpt-oss-120b and chat to gemini/3.6-flash](docs/images/setup-roles.png)
 
 Its **Who does what** tab is where you say which model does which job —
 planner, chat and questions, backend, frontend, styling, docs, glue, reviewer.
@@ -314,6 +324,12 @@ evidence about them should not be the one part that lives in scrollback.
 
 ### Watching a run
 
+![The dashboard: a finished run showing each node with its role, the model that
+wrote it, state, attempts and token counts; per-model totals against the day's
+and the minute's limits; then the output path, eight cross-artifact checks
+passed, and the smoke run's HTTP probes each returning
+200](docs/images/dashboard.png)
+
 **The tables are in the browser, not the terminal.** A run's numbers change
 while it is happening, and a terminal can only show the state they were in when
 it ended — which is the least interesting moment. So a run publishes what it is
@@ -363,9 +379,23 @@ Current state, what is next, and the invariants not to break are in
 [HANDOFF.md](HANDOFF.md). The original 45k plan is in
 [docs/original-plan.md](docs/original-plan.md).
 
-## Install
+## Getting it
 
-**Windows — run this once and you never touch a path again:**
+You need **Python 3.11 or newer** and **git**. No API key is required to try it.
+
+### 1. Get the code
+
+```bash
+git clone https://github.com/Pranay4040/llmorch.git
+cd llmorch
+```
+
+No git? On the [repository page](https://github.com/Pranay4040/llmorch), use the
+green **Code** button → **Download ZIP**, unzip it, and `cd` into the folder.
+
+### 2. Install it
+
+**Windows** — one command, and you never touch a path again:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\setup.ps1
@@ -373,21 +403,72 @@ powershell -ExecutionPolicy Bypass -File .\setup.ps1
 
 It creates the virtualenv, installs llmorch, puts it on your PATH so `llmorch`
 works from any directory, and leaves an `llmorch` shortcut on your Desktop that
-opens its own window. After that, double-click the icon or type `llmorch`.
+opens its own window.
 
-**Everywhere else:**
+**macOS and Linux:**
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e ".[dev]"
-python -m pytest -q
 ```
 
 That puts an `llmorch` executable in the environment's `bin` directory, which
-answers to a bare `llmorch` only once that directory is on PATH — activate the
-virtualenv and it is. Without activating, the repository root carries a shim
-that needs neither: `./llmorch`, or `llmorch.cmd` on Windows.
+answers to a bare `llmorch` only once that directory is on PATH — activating the
+virtualenv does it. Without activating, the repository root carries a shim that
+needs neither: `./llmorch`, or `llmorch.cmd` on Windows.
 
-CI runs that suite on Linux (3.11 and 3.13) and Windows (3.12), then does a full
+### 3. Check it works — no key, no network
+
+```bash
+python -m pytest -q                     # 766 tests, all offline
+llmorch run "build a notes app"         # a whole build against the mock provider
+```
+
+The second one plans, executes, writes a folder and checks the result without
+touching the network. If that works, the install is sound.
+
+### 4. Get a key
+
+Groq is the one to start with — it is free and allows a thousand requests a day:
+
+1. Sign up at [console.groq.com](https://console.groq.com).
+2. Create an API key.
+3. Run `llmorch` and paste it into the **Keys** tab, or put it in `.env`
+   yourself:
+
+   ```
+   GROQ_API_KEY=your-key-here
+   ```
+
+`.env` is gitignored, and so is anything else matching `.env*`. Copy
+`.env.example` if you want the comments explaining each provider's free tier.
+
+Gemini ([ai.google.dev](https://ai.google.dev)) and OpenRouter
+([openrouter.ai](https://openrouter.ai)) are also free and already declared in
+`models.yaml`. Any two vendors is enough for cross-vendor review to work.
+
+### 5. Confirm the key reaches something
+
+```bash
+llmorch doctor --probe --providers groq
+```
+
+One trivial call per model. It proves the key, the wire names and the limits —
+a model list is not an entitlement, and this is the only thing that tells them
+apart.
+
+### 6. Use it
+
+```bash
+llmorch          # choose your models and how runs behave, in a browser
+llmorch start    # then talk to it
+```
+
+## Continuous integration
+
+CI runs the suite on Linux (3.11 and 3.13) and Windows (3.12), then does a full
 offline demo run with `--smoke` — plan, execute against the mock provider, write
-the folder, and start what it wrote. Windows is in the matrix on purpose: three
-of the invariants this project holds were faults that only appear there.
+the folder, and start what it wrote. It needs no secrets and never spends quota.
+Windows is in the matrix on purpose: several of the invariants this project
+holds were faults that appear only there.
