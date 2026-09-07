@@ -50,13 +50,13 @@ Linux (3.11, 3.13) and Windows (3.12), then does a full offline demo run with
 `--smoke`. Everything it does is offline, so CI needs no secrets and never
 spends quota.
 
-## Roster (verified live 2026-09-01)
+## Roster (verified live 2026-09-01; OpenRouter additions 2026-09-07)
 
 | Vendor | Models | Real limits |
 |---|---|---|
 | Groq | gpt-oss-120b, gpt-oss-20b, qwen3-27b | 1,000 req/day, 8,000 TPM — **from its own headers** |
 | Gemini | 3.6-flash | 20 req/**minute** — from a 429 body. Daily figure unverified |
-| OpenRouter | minimax-m3, nemotron-ultra, north-mini-code | free tier; limits estimated |
+| OpenRouter | minimax-m3, nemotron-ultra, north-mini-code, laguna-s, laguna-xs, dots-3-note, minimax-m2.7, ling-flash-fin, lfm-2.5, nemotron-lightning, nemotron-super | free tier; **50 req/day account-scoped**, so more models here is diversity, not capacity |
 
 ---
 
@@ -109,6 +109,19 @@ Ordered by value. Issues #1–#4 are filed on GitHub.
 
 Each was learned by getting it wrong against a live API.
 
+- **A bigger roster does not mean a bigger allowance, and can mean less
+  negotiation.** OpenRouter's 50 requests a day are account-scoped, so the eight
+  models added on 2026-09-07 share one bucket with the three that were already
+  there — what they buy is vendor diversity for review and failover, not
+  throughput. And `should_bid` skips the bidding round when there are more
+  models than nodes, so a 15-model roster retires it under `auto` for any
+  normal-sized graph. Both are the right behaviour and neither is obvious.
+- **A newly verified model is not a better model.** The 2026-09-07 additions sit
+  at the tail of every chain and score below the incumbents, so the default
+  assignment did not move. They are reachable through failover, through
+  cross-vendor review, and through a pin — and `profiles.json` promotes them on
+  their own if they earn it. Raising their priors to make them get picked would
+  be inventing the evidence the priors are supposed to record.
 - **A pin binds the assignment and nothing else.** Choosing a model for a job
   overrides the reconciler's choice for that role and leaves every other
   mechanism intact: failover still runs its whole ladder, since a model that has
