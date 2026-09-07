@@ -72,6 +72,7 @@ class Scheduler:
         profiles: Profiles | None = None,
         checkpoints: bool = False,
         pins: dict | None = None,
+        strategy: str = "fitness",
         progress: ProgressWriter | None = None,
         sleep=asyncio.sleep,
     ) -> None:
@@ -88,6 +89,8 @@ class Scheduler:
         self.ledger = ledger
         self.profiles = profiles or Profiles()
         self.checkpoints = checkpoints
+        self.strategy = strategy
+        """fitness | round_robin — see `ReconcileInput.strategy`."""
         self.pins = dict(pins or {})
         """role -> model a person chose. Binds the assignment, never failover."""
         self.progress = progress
@@ -119,6 +122,7 @@ class Scheduler:
             track_record=self.profiles.as_track_record(),
             quota_pressure=self._quota_pressure(),
             pins={role: m for role, m in self.pins.items() if m not in exclude},
+            strategy=self.strategy,
             imbalance_tolerance=self.config.imbalance_tolerance,
         )
 

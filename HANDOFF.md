@@ -109,6 +109,17 @@ Ordered by value. Issues #1–#4 are filed on GitHub.
 
 Each was learned by getting it wrong against a live API.
 
+- **Round robin is not a better assignment, it is a different one.** Fitness
+  weighs affinity, track record and remaining quota, then caps any one model's
+  share; rotation ignores all of that and spreads per-minute token pressure
+  across more vendors, which is the ceiling that actually stalls a run. The
+  reconciler says out loud that it did not consult the track record, because a
+  plan that looks worse for a reason nobody stated reads as a regression.
+- **Rotation still only offers a model that can serve the node.** The cursor
+  advances over the *feasible* options per node and is global rather than
+  per node, or every node would start from the same model and the rotation
+  would not rotate. Pins are untouched: a pinned role has one option, so there
+  is nothing to rotate through.
 - **Neither local server may share its port.** `HTTPServer` sets
   `allow_reuse_address`, which on POSIX only skips TIME_WAIT and on Windows lets
   a *second* process bind an address a first is already listening on — with

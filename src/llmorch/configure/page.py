@@ -209,6 +209,12 @@ PAGE = """<!doctype html>
     </p>
     <div id="pick-crew" class="pick"></div>
     <div class="opts" style="margin-top:12px">
+      <label class="check">divide work by
+        <select id="assignment">
+          <option value="fitness">best fit and fair share</option>
+          <option value="round_robin">round robin</option>
+        </select>
+      </label>
       <label class="check">review
         <select id="review">
           <option value="off">off — no cross-vendor review</option>
@@ -219,10 +225,10 @@ PAGE = """<!doctype html>
       <label class="check">max nodes <input type="number" id="max_nodes" min="1" max="25"></label>
       <label class="check">at once <input type="number" id="concurrency" min="1" max="16"></label>
     </div>
+    <p class="hint" id="assignmenthint"></p>
     <p class="hint">
-      Who gets which job is on the <em>Who does what</em> tab. Leave it all on
-      Automatic and the work is split by fitness, remaining quota and an even
-      share.
+      Who gets which job is on the <em>Who does what</em> tab. A model pinned
+      there is used whichever way the work is divided.
     </p>
   </section>
 
@@ -343,6 +349,14 @@ function drawSettings() {
   const s = config.settings;
   document.getElementById("live").checked = s.live;
   document.getElementById("review").value = s.review;
+  document.getElementById("assignment").value = s.assignment || "fitness";
+  document.getElementById("assignmenthint").textContent =
+    (s.assignment === "round_robin")
+      ? "Rotation. Ignores affinity and track record, and spreads per-minute "
+        + "token pressure across more vendors — which is the pressure that "
+        + "actually stalls a run against a tight ceiling."
+      : "Weighs affinity, track record and remaining quota, then caps how much "
+        + "of the work any one model may take.";
   document.getElementById("smoke").checked = s.smoke;
   document.getElementById("smoke_install").checked = s.smoke_install;
   document.getElementById("max_nodes").value = s.max_nodes;
@@ -351,6 +365,11 @@ function drawSettings() {
     ? "Live: every turn spends real quota against the keys above."
     : "Mock: no network, no quota — and the same canned answer whatever you type.";
 }
+
+document.getElementById("assignment").addEventListener("change", () => {
+  config.settings.assignment = document.getElementById("assignment").value;
+  drawSettings();
+});
 
 document.getElementById("live").addEventListener("change", () => {
   config.settings.live = document.getElementById("live").checked;
@@ -577,6 +596,7 @@ document.getElementById("save").addEventListener("click", async () => {
     mode: config.settings.mode || "",
     agent_model: document.getElementById("agent_model").value,
     answer_reads_files: document.getElementById("answer_reads_files").checked,
+    assignment: document.getElementById("assignment").value,
     review: document.getElementById("review").value,
     smoke: document.getElementById("smoke").checked,
     smoke_install: document.getElementById("smoke_install").checked,

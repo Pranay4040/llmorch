@@ -38,6 +38,7 @@ SETTINGS_NAME = "settings.json"
 SETTINGS_VERSION = 1
 
 REVIEW_MODES = ("off", "code", "all")
+STRATEGIES = ("fitness", "round_robin")
 
 MAX_NODES_RANGE = (1, 25)
 CONCURRENCY_RANGE = (1, 16)
@@ -100,6 +101,15 @@ class Settings:
     around. Worth being able to switch off — it is the only path by which the
     contents of what you built reach a provider at all."""
 
+    assignment: str = "fitness"
+    """fitness | round_robin — how a crew divides the work.
+
+    `fitness` weighs affinity, track record and remaining quota, then caps any
+    one model's share. `round_robin` rotates instead: it ignores everything the
+    scoring knows and spreads per-minute token pressure across more vendors,
+    which is the pressure that actually stalls a run against an 8,000 TPM
+    ceiling. Neither is better in general."""
+
     review: str = "code"
     smoke: bool = False
     smoke_install: bool = False
@@ -124,6 +134,7 @@ class Settings:
             "mode": self.mode,
             "agent_model": self.agent_model,
             "answer_reads_files": self.answer_reads_files,
+            "assignment": self.assignment,
             "review": self.review,
             "smoke": self.smoke,
             "smoke_install": self.smoke_install,
@@ -210,6 +221,11 @@ def from_dict(raw: Any) -> Settings:
         mode=str(raw.get("mode") or "").strip().lower(),
         agent_model=str(raw.get("agent_model") or "").strip(),
         answer_reads_files=bool(raw.get("answer_reads_files", True)),
+        assignment=(
+            str(raw.get("assignment") or "").strip().lower()
+            if str(raw.get("assignment") or "").strip().lower() in STRATEGIES
+            else "fitness"
+        ),
         review=review if review in REVIEW_MODES else "code",
         smoke=bool(raw.get("smoke", False)),
         smoke_install=bool(raw.get("smoke_install", False)),

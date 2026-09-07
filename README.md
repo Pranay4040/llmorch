@@ -136,8 +136,8 @@ be the reason you cannot do something once.
 It has a tab per mode — **Chat**, **AI agent**, **Crew** — each holding what
 that mode needs and nothing else: who answers questions and whether an answer
 may quote a file you named; which single model writes everything, and the warning
-that review cannot run when there is only one; review depth, node budget and how
-many run at once. Choosing a mode there is its own control rather than a side
+that review cannot run when there is only one; review depth, node budget, how many
+run at once, and whether the work is divided by fitness or by rotation. Choosing a mode there is its own control rather than a side
 effect of opening the tab, so looking at what a mode would do never changes which
 one you get.
 

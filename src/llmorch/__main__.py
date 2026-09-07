@@ -545,6 +545,7 @@ def _setup(
         profiles=profiles,
         checkpoints=True,
         pins=roster.pins,
+        strategy=getattr(args, "assignment", "fitness"),
     )
     graph.warnings.extend(roster.warnings)
     return Session(roster=roster, graph=graph, scheduler=scheduler)
@@ -986,6 +987,7 @@ def cmd_start(args) -> int:
         args.mode = chosen.mode
     args.agent_model = chosen.agent_model
     args.answer_reads_files = chosen.answer_reads_files
+    args.assignment = chosen.assignment
     args.review = chosen.review
     args.smoke = chosen.smoke
     args.smoke_install = chosen.smoke_install

@@ -282,3 +282,104 @@ def test_start_carries_the_saved_pins_into_the_assignment(tmp_path, monkeypatch,
     frontend = [n for n in conversation.files.values() if n.role == "frontend"]
     assert frontend
     assert all(note.model_id == "openrouter/minimax-m3" for note in frontend)
+
+
+# ==========================================================================
+# How the work is divided
+# ==========================================================================
+
+
+def test_round_robin_spreads_the_work_wider_than_fitness():
+    """The reason to want it: per-minute token pressure lands on more vendors,
+    and that ceiling is what actually stalls a run."""
+    fitness = reconcile(_input(strategy="fitness"))
+    rotated = reconcile(_input(strategy="round_robin"))
+
+    def models(plan):
+        return {a.model_id for a in plan.assignments.values()}
+
+    assert len(models(rotated)) > len(models(fitness))
+    assert set(rotated.assignments) == set(fitness.assignments)
+
+
+def test_round_robin_still_only_uses_a_model_that_can_serve_the_node():
+    """The rotation is over the models feasible for that node, so a small
+    ceiling is skipped rather than handed a file it cannot emit."""
+    huge = TaskNode(
+        id="huge",
+        title="an enormous file",
+        role=Role.BACKEND,
+        spec="x",
+        output_path="huge.py",
+        est_output_tokens=9000,  # past every Groq model's 4,096 output cap
+    )
+    plan = reconcile(_input(nodes=[huge, *build_nodes()], strategy="round_robin"))
+
+    assert plan.assignments["huge"].model_id.startswith(("gemini/", "openrouter/"))
+
+
+def test_a_pin_still_wins_under_round_robin():
+    """Rotation has nothing to choose from for a pinned role, so the pin stands
+    exactly as it does under fitness."""
+    plan = reconcile(
+        _input(strategy="round_robin", pins={Role.FRONTEND: "openrouter/minimax-m3"})
+    )
+
+    graph = TaskGraph.build(build_nodes())
+    frontend = [n for n, node in graph.nodes.items() if node.role is Role.FRONTEND]
+    assert all(
+        plan.assignments[n].model_id == "openrouter/minimax-m3" for n in frontend
+    )
+
+
+def test_round_robin_is_deterministic():
+    """A run has to be reproducible, and a test has to be possible."""
+    first = reconcile(_input(strategy="round_robin")).assignments
+    second = reconcile(_input(strategy="round_robin")).assignments
+
+    assert {n: a.model_id for n, a in first.items()} == {
+        n: a.model_id for n, a in second.items()
+    }
+
+
+def test_round_robin_says_what_it_is_not_consulting():
+    plan = reconcile(_input(strategy="round_robin"))
+    assert any("not consulted" in note for note in plan.notes)
+
+
+def test_the_strategy_survives_the_settings_file():
+    settings_module.Settings(assignment="round_robin").save()
+    assert settings_module.load().assignment == "round_robin"
+
+
+def test_an_unknown_strategy_falls_back_to_fitness():
+    """The scoring path is the one with a fair-share cap in it, so an
+    unrecognised value must not silently disable that."""
+    assert settings_module.from_dict({"assignment": "vibes"}).assignment == "fitness"
+    assert settings_module.from_dict({}).assignment == "fitness"
+
+
+def test_start_carries_the_strategy_into_the_assignment(tmp_path, monkeypatch, capsys):
+    from llmorch import __main__ as cli
+    from llmorch.demo.website import ARTIFACTS
+    from llmorch.providers.base import ProviderRegistry
+    from llmorch.providers.mock import MockProvider
+    from llmorch.chat import Conversation
+
+    settings_module.Settings(live=False, assignment="round_robin", mode="crew").save()
+
+    def registry(manifest):
+        provider = MockProvider(responses=dict(ARTIFACTS))
+        built = ProviderRegistry()
+        for model in manifest.enabled_models:
+            built.register(model.id, provider)
+        return built, provider
+
+    monkeypatch.setattr(cli, "_mock_registry", registry)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "/quit")
+
+    assert cli.main(["start", "build a notes app"]) == 0
+
+    out = capsys.readouterr().out
+    conversation = Conversation.load(out.split("Session ", 1)[1].split(" saved", 1)[0])
+    assert len({n.model_id for n in conversation.files.values()}) > 1

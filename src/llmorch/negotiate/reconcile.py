@@ -55,6 +55,15 @@ class ReconcileInput:
     It binds the *assignment* and nothing else. Failover still runs its full
     ladder, because a pinned model that has tripped its circuit breaker is not
     the model anybody meant to insist on."""
+    strategy: str = "fitness"
+    """fitness | round_robin — how a node picks among the models that can serve it.
+
+    `fitness` scores every pair and takes the best subject to a fair-share cap.
+    `round_robin` hands nodes out in rotation instead, which spreads per-minute
+    token pressure across vendors more evenly than scoring does and ignores
+    everything the scoring knows. Neither is better in general: one optimises
+    who does the work, the other optimises how hard any one provider is pushed.
+    """
     imbalance_tolerance: float = 0.35
 
 
@@ -215,6 +224,9 @@ def reconcile(inp: ReconcileInput) -> ReconcileResult:
         options.sort(key=lambda t: (-t[0], t[1]))
         scored[node_id] = options
 
+    if inp.strategy == "round_robin":
+        return _round_robin(inp, scored, result)
+
     if not scored:
         return result
 
@@ -273,6 +285,52 @@ def reconcile(inp: ReconcileInput) -> ReconcileResult:
     # 4. 2-opt: swap pairs where both nodes end up better off.
     _two_opt(inp, scored, result, load, per_model_cap)
 
+    return result
+
+
+def _round_robin(
+    inp: ReconcileInput,
+    scored: dict[str, list[tuple[float, str, ScoreBreakdown]]],
+    result: ReconcileResult,
+) -> ReconcileResult:
+    """Hand the nodes out in rotation rather than by score.
+
+    Two properties keep this honest rather than merely different:
+
+    **A node still only goes to a model that can serve it.** The rotation is
+    over the models feasible for *that* node, so a small-ceiling model is
+    skipped for a large file instead of being handed one it cannot emit. That is
+    also why the cursor is global rather than per node — otherwise every node
+    would start from the same model and the rotation would not rotate.
+
+    **A pin still wins.** `scored` already holds one option for a pinned role,
+    so rotation has nothing to choose from and the pin stands, exactly as it
+    does under fitness.
+
+    It is deterministic: the same graph and roster produce the same assignment,
+    which is what makes a run reproducible and a test possible.
+    """
+    order = sorted(scored, key=lambda n: (-inp.graph.nodes[n].est_output_tokens, n))
+    cursor = 0
+
+    for node_id in order:
+        options = scored[node_id]
+        by_id = sorted(options, key=lambda t: t[1])
+        score, model_id, breakdown = by_id[cursor % len(by_id)]
+        cursor += 1
+        result.assignments[node_id] = Assignment(
+            node_id=node_id,
+            model_id=model_id,
+            score=score,
+            breakdown=breakdown,
+            rationale="round robin: next in rotation among the models that can "
+            "serve this node",
+        )
+
+    result.notes.append(
+        "round robin: work divided by rotation, not by fitness — a model's "
+        "track record and role affinity are not consulted"
+    )
     return result
 
 
