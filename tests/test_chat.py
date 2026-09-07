@@ -350,7 +350,7 @@ def test_a_first_turn_builds_and_a_second_can_change_nothing(
     out = capsys.readouterr().out
     assert "nothing to change" in out
 
-    session_id = out.split("New session ", 1)[1].split(".", 1)[0]
+    session_id = out.split("Session ", 1)[1].split(" saved", 1)[0]
     conversation = Conversation.load(session_id)
     assert [t.instruction for t in conversation.turns] == [
         "build a notes app",
@@ -374,7 +374,7 @@ def test_a_second_turn_rewrites_only_what_the_change_needs(
     args.func(args)
 
     out = capsys.readouterr().out
-    session_id = out.split("New session ", 1)[1].split(".", 1)[0]
+    session_id = out.split("Session ", 1)[1].split(" saved", 1)[0]
     conversation = Conversation.load(session_id)
 
     assert len(conversation.turns[0].planned) == 6
@@ -434,7 +434,7 @@ def test_an_opening_instruction_is_said_for_you(tmp_path, monkeypatch, capsys):
     assert cli.main(["build a notes app"]) == 0
 
     out = capsys.readouterr().out
-    session_id = out.split("New session ", 1)[1].split(".", 1)[0]
+    session_id = out.split("Session ", 1)[1].split(" saved", 1)[0]
     conversation = Conversation.load(session_id)
     assert [t.instruction for t in conversation.turns] == ["build a notes app"]
 
@@ -502,3 +502,121 @@ def test_the_repository_shim_runs_the_cli():
 
     assert finished.returncode == 0, finished.stderr
     assert "usage: llmorch" in finished.stdout
+
+
+# ==========================================================================
+# A session that says what it is
+# ==========================================================================
+
+
+def test_a_session_is_named_after_what_was_asked_for():
+    from llmorch.chat import name_session
+
+    assert name_session("20260907-165836", "build a notes app") == (
+        "20260907-165836-notes-app"
+    )
+
+
+def test_the_leading_verb_and_the_filler_are_dropped():
+    """`build-a-notes-app` and `notes-app` say the same thing, and only one of
+    them is still readable at 32 characters."""
+    from llmorch.chat import slugify
+
+    assert slugify("build a notes app") == "notes-app"
+    assert slugify("now add a delete button") == "delete-button"
+    assert slugify("build a CLI that converts CSV to markdown") == (
+        "cli-converts-csv-markdown"
+    )
+
+
+def test_a_name_with_nothing_in_it_leaves_the_timestamp_alone():
+    """"build a thing" reduces to nothing worth naming a directory after, and a
+    bare timestamp is better than a directory called `-`."""
+    from llmorch.chat import name_session, slugify
+
+    assert slugify("build a") == ""
+    assert name_session("20260907-165836", "build the") == "20260907-165836"
+
+
+def test_the_timestamp_stays_in_front_so_the_names_still_sort(tmp_path, monkeypatch):
+    """`latest_session`, `resume --list` and the dashboard all order runs by the
+    directory name and nothing else."""
+    monkeypatch.setenv("LLMORCH_RUNS_DIR", str(tmp_path))
+    for session_id in (
+        "20260101-000000-old-thing",
+        "20260301-120000-newest-thing",
+        "20260201-000000",
+    ):
+        conversation = Conversation(session_id=session_id)
+        conversation.record("x", NODES, _results("index"), InterfaceContract())
+        conversation.save()
+
+    assert latest_session() == "20260301-120000-newest-thing"
+
+
+def test_two_sessions_in_one_second_about_one_thing_do_not_collide():
+    from llmorch.chat import name_session
+
+    taken = {"20260907-165836-notes-app"}
+    assert name_session("20260907-165836", "build a notes app", taken=taken) == (
+        "20260907-165836-notes-app-2"
+    )
+
+
+def test_a_session_is_named_only_before_anything_of_it_is_on_disk(
+    tmp_path, monkeypatch
+):
+    """The id is a directory name, a checkpoint key and the run_id on every
+    ledger row the session produces. Renaming it later would orphan all three."""
+    monkeypatch.setenv("LLMORCH_RUNS_DIR", str(tmp_path))
+    conversation = Conversation(session_id="20260907-165836")
+
+    assert conversation.name_for("build a notes app") == "20260907-165836-notes-app"
+
+    conversation.record("build a notes app", NODES, _results("index"), InterfaceContract())
+    conversation.save()
+
+    # A second instruction must not move the session out from under its own files.
+    assert conversation.name_for("now add tags") == "20260907-165836-notes-app"
+
+
+def test_the_slug_alone_is_enough_to_name_a_session(tmp_path, monkeypatch):
+    from llmorch.chat import resolve_session
+
+    monkeypatch.setenv("LLMORCH_RUNS_DIR", str(tmp_path))
+    (tmp_path / "20260907-165836-notes-app").mkdir(parents=True)
+    (tmp_path / "20260906-101010-csv-tool").mkdir(parents=True)
+
+    assert resolve_session("notes-app") == "20260907-165836-notes-app"
+    assert resolve_session("20260906-101010-csv-tool") == "20260906-101010-csv-tool"
+
+
+def test_an_ambiguous_name_resolves_to_nothing(tmp_path, monkeypatch):
+    """Resuming the wrong conversation is a worse outcome than being asked
+    again."""
+    from llmorch.chat import resolve_session
+
+    monkeypatch.setenv("LLMORCH_RUNS_DIR", str(tmp_path))
+    (tmp_path / "20260907-165836-notes-app").mkdir(parents=True)
+    (tmp_path / "20260906-101010-notes-app").mkdir(parents=True)
+
+    assert resolve_session("notes-app") is None
+    assert resolve_session("nothing-like-this") is None
+
+
+def test_the_cli_names_the_session_from_the_first_instruction(
+    tmp_path, monkeypatch, capsys
+):
+    from llmorch import __main__ as cli
+
+    _offline(monkeypatch, tmp_path, revise_response='{"nodes": []}')
+    _script(monkeypatch, "/quit")
+
+    assert cli.main(["build a notes app"]) == 0
+
+    out = capsys.readouterr().out
+    session_id = out.split("Session ", 1)[1].split(" saved", 1)[0]
+
+    assert session_id.endswith("-notes-app")
+    assert (tmp_path / session_id).is_dir()
+    assert Conversation.load(session_id) is not None

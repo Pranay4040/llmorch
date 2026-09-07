@@ -1,6 +1,6 @@
 # llmorch — handoff
 
-**State:** M0–M6 done, plus the smoke run, the question lane, the setup page, live run tracking and per-job model choice. 706 tests pass,
+**State:** M0–M6 done, plus the smoke run, the question lane, the setup page, live run tracking and per-job model choice. 715 tests pass,
 1 skipped on Windows (a symlink test needing admin). Published at
 github.com/Pranay4040/llmorch, tagged `v0.1.0`.
 
@@ -18,7 +18,7 @@ Two things in one repo:
 ## Run it
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q                  # 706 tests, no network
+.venv/Scripts/python.exe -m pytest -q                  # 715 tests, no network
 .venv/Scripts/python.exe -m llmorch run "build a notes app"        # mock, offline
 .venv/Scripts/python.exe -m llmorch run --smoke "<task>"          # ...then run the result
 .venv/Scripts/python.exe -m llmorch run --smoke-install "<task>"  # ...installing its deps first
@@ -109,6 +109,15 @@ Ordered by value. Issues #1–#4 are filed on GitHub.
 
 Each was learned by getting it wrong against a live API.
 
+- **A session is named once, before anything of it is on disk.** The id is a
+  directory name, a checkpoint key and the `run_id` on every ledger row the
+  session produces, so the one safe moment to name it is the first instruction —
+  when none of those exist yet. `Conversation.name_for` refuses after that
+  rather than renaming and orphaning all three.
+- **The timestamp stays in front of the slug.** `latest_session`,
+  `resume --list` and the dashboard's run list all order runs by the directory
+  name and nothing else, so the prefix has to stay fixed-width and sortable. The
+  slug is for the reader; the prefix is load-bearing.
 - **A bigger roster does not mean a bigger allowance, and can mean less
   negotiation.** OpenRouter's 50 requests a day are account-scoped, so the eight
   models added on 2026-09-07 share one bucket with the three that were already

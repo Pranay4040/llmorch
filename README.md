@@ -155,7 +155,11 @@ turn remembers is the instructions, the interface contract, and one summary per
 file — never the file contents, because a conversation that pasted its artifacts
 back into the planner would grow every prompt with the project instead of with
 the request. Sessions are saved after every turn; `--continue` picks the last one
-back up.
+back up. A session is named after the first thing you ask it for —
+`20260907-165836-notes-app` — and the slug alone is enough to name it again:
+`llmorch ask --session notes-app "..."`. The timestamp stays in front because it
+is what makes these sort chronologically, which is how "the most recent session"
+is worked out.
 
 **Not every line is an instruction.** "what does the server do?" is a question
 and "looks good" is neither, and a session that planned both spent a request to

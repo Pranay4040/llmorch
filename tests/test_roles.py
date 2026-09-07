@@ -276,7 +276,7 @@ def test_start_carries_the_saved_pins_into_the_assignment(tmp_path, monkeypatch,
     assert cli.main(["start", "build a notes app"]) == 0
 
     out = capsys.readouterr().out
-    session_id = out.split("New session ", 1)[1].split(".", 1)[0]
+    session_id = out.split("Session ", 1)[1].split(" saved", 1)[0]
     conversation = Conversation.load(session_id)
 
     frontend = [n for n in conversation.files.values() if n.role == "frontend"]

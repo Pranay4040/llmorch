@@ -43,7 +43,12 @@ from .engine.checkpoint import (
 )
 from .engine.contracts import artifacts_from_results, check_contract
 from .engine.graph import TaskGraph
-from .chat import Conversation, latest_session, merge_interfaces
+from .chat import (
+    Conversation,
+    latest_session,
+    merge_interfaces,
+    resolve_session,
+)
 from .engine.materialize import materialize
 from .engine.progress import ProgressWriter
 from .engine.scheduler import Scheduler
@@ -692,7 +697,7 @@ def _read_output(output_dir: Path) -> dict[str, str]:
     return files
 
 
-def _chat_command(line: str, history: Conversation, config_dir: Path) -> bool:
+def _chat_command(line: str, history: Conversation) -> bool:
     """Handle a `/command`. Returns False when the session should end."""
     command = line.split()[0].lower()
 
@@ -712,7 +717,7 @@ def _chat_command(line: str, history: Conversation, config_dir: Path) -> bool:
             mark = {"ask": "?", "remark": "·"}.get(turn.kind, " ")
             print(f"  {index}. {mark} {turn.instruction}{degraded}")
     elif command == "/report":
-        print(f"  {config_dir / REPORT_NAME}")
+        print(f"  {runs_dir() / history.session_id / REPORT_NAME}")
     else:
         print(f"  unknown command {command}; /help lists them")
     return True
@@ -782,7 +787,6 @@ def _answer_question(
 def _chat_turn(
     args,
     history: Conversation,
-    run_dir: Path,
     line: str,
     *,
     intent: Intent | None = None,
@@ -794,6 +798,15 @@ def _chat_turn(
     told there was nothing to plan.
     """
     lane = intent or classify(line)
+
+    # Named here, before anything of this session touches the disk: the id is a
+    # directory name, a checkpoint key and the run_id on every ledger row it
+    # produces, so this is the only moment it can change safely.
+    before = history.session_id
+    named = history.name_for(line)
+    if named != before:
+        print(f"  session {named}")
+    run_dir = runs_dir() / named
 
     if lane is Intent.REMARK:
         print("  noted — nothing to build\n")
@@ -833,11 +846,15 @@ def _chat_turn(
 
 def cmd_chat(args) -> int:
     """A session with the orchestrator rather than one shot at it."""
-    session_id = args.session or (latest_session() if args.continue_ else None)
+    session_id = (
+        resolve_session(args.session) or args.session
+        if args.session
+        else (latest_session() if args.continue_ else None)
+    )
     history = Conversation.load(session_id) if session_id else None
     if history is None:
         history = Conversation(session_id=session_id or _run_id())
-        print(f"New session {history.session_id}.")
+        print("New session — it takes its name from your first instruction.")
     else:
         print(
             f"Resuming {history.session_id}: {len(history.turns)} turn(s), "
@@ -845,13 +862,12 @@ def cmd_chat(args) -> int:
         )
 
     print("Type an instruction, or /help. Ctrl-D to leave.\n")
-    run_dir = runs_dir() / history.session_id
 
     # `llmorch "build a notes app"` starts the session with that already said,
     # so the shortest way in is one line rather than two.
     if getattr(args, "first", None):
         print(f"> {args.first}")
-        _chat_turn(args, history, run_dir, args.first)
+        _chat_turn(args, history, args.first)
 
     while True:
         try:
@@ -869,15 +885,15 @@ def cmd_chat(args) -> int:
             forced = {"/ask": Intent.ASK, "/build": Intent.BUILD}.get(verb.lower())
             if forced is not None:
                 if rest.strip():
-                    _chat_turn(args, history, run_dir, rest.strip(), intent=forced)
+                    _chat_turn(args, history, rest.strip(), intent=forced)
                 else:
                     print(f"  {verb} needs something after it")
                 continue
-            if not _chat_command(line, history, run_dir):
+            if not _chat_command(line, history):
                 break
             continue
 
-        _chat_turn(args, history, run_dir, line)
+        _chat_turn(args, history, line)
 
     print(f"Session {history.session_id} saved to {history.path}")
     return 0
@@ -929,7 +945,11 @@ def cmd_ask(args) -> int:
     for the case where the project is already built and the question is the only
     thing being said.
     """
-    session_id = args.session or latest_session()
+    session_id = (
+        resolve_session(args.session) or args.session
+        if args.session
+        else latest_session()
+    )
     history = Conversation.load(session_id) if session_id else None
     if history is None:
         print(

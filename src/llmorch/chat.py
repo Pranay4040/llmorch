@@ -26,6 +26,7 @@ three-file one, and the twentieth turn costs what the second did.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -181,6 +182,21 @@ class Conversation:
         )
         self.turns.append(turn)
         return turn
+
+    def name_for(self, instruction: str) -> str:
+        """Give the session a name taken from the first thing said to it.
+
+        Only ever before its first save. The id is a directory name, a
+        checkpoint key and the `run_id` on every ledger row this session
+        produces; renaming it once any of those exist would orphan all three, so
+        the window for naming is the one moment when none of them do.
+        """
+        if self.turns or self.files or self.path.exists():
+            return self.session_id
+        self.session_id = name_session(
+            self.session_id, instruction, taken=set(existing_sessions())
+        )
+        return self.session_id
 
     def record_said(
         self, line: str, *, kind: str, answer: str = "", now: str | None = None
@@ -363,6 +379,95 @@ class Conversation:
             if note.path:
                 conversation.files[note.path] = note
         return conversation
+
+
+# Words that carry no information about what a session is *about*. The leading
+# verb goes because every instruction starts with one — a directory called
+# `build-a-notes-app` and one called `notes-app` say the same thing, and only one
+# of them is still readable at 32 characters.
+_OPENERS = frozenset(
+    {"build", "make", "create", "write", "generate", "produce", "give", "add",
+     "implement", "do", "please", "now", "can", "you", "could", "i", "want",
+     "need", "lets", "let's"}
+)
+_STOPWORDS = frozenset(
+    {"a", "an", "the", "that", "this", "to", "for", "with", "and", "of", "in",
+     "on", "at", "by", "from", "into", "as", "it", "its", "me", "my", "some",
+     "using", "use", "which", "is", "are", "be"}
+)
+
+SLUG_WORDS = 4
+SLUG_CHARS = 32
+
+_WORDS = re.compile(r"[A-Za-z0-9]+")
+
+
+def slugify(instruction: str, *, words: int = SLUG_WORDS, chars: int = SLUG_CHARS) -> str:
+    """A short, filesystem-safe name for what was asked for.
+
+    Empty when nothing survives, which is a real answer: "build a thing" reduces
+    to nothing worth naming a directory after, and a session called
+    `20260907-165836` is better than one called `20260907-165836-thing`.
+    """
+    tokens = [w.lower() for w in _WORDS.findall(instruction)]
+
+    while tokens and tokens[0] in _OPENERS:
+        tokens.pop(0)
+    kept = [w for w in tokens if w not in _STOPWORDS][:words]
+
+    slug = "-".join(kept)[:chars].strip("-")
+    return slug
+
+
+def name_session(stamp: str, instruction: str, *, taken=None) -> str:
+    """`<stamp>-<slug>`, or the bare stamp when there is no usable slug.
+
+    The timestamp stays in front and stays fixed-width, because it is what makes
+    these names sort chronologically — `latest_session`, `resume --list` and the
+    dashboard's run list all order by the directory name and nothing else.
+    """
+    slug = slugify(instruction)
+    if not slug:
+        return stamp
+
+    candidate = f"{stamp}-{slug}"
+    if taken is None:
+        return candidate
+
+    # Two sessions in the same second about the same thing. Vanishingly rare and
+    # cheap to rule out, and the alternative is one session writing into
+    # another's directory.
+    suffix = 2
+    unique = candidate
+    while unique in taken:
+        unique = f"{candidate}-{suffix}"
+        suffix += 1
+    return unique
+
+
+def existing_sessions() -> list[str]:
+    root = runs_dir()
+    if not root.is_dir():
+        return []
+    return sorted(p.name for p in root.iterdir() if p.is_dir())
+
+
+def resolve_session(name: str) -> str | None:
+    """Find a session from whatever the person typed.
+
+    An exact id wins. Otherwise the slug alone is enough — `llmorch resume
+    notes-app` rather than `llmorch resume 20260907-165836-notes-app` — as long
+    as it picks out one session. Ambiguity returns None rather than guessing:
+    resuming the wrong conversation is a worse outcome than being asked again.
+    """
+    if not name:
+        return None
+    sessions = existing_sessions()
+    if name in sessions:
+        return name
+
+    matches = [s for s in sessions if s.endswith(f"-{name}") or name in s]
+    return matches[-1] if len(matches) == 1 else None
 
 
 def latest_session() -> str | None:

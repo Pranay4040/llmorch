@@ -449,7 +449,7 @@ def test_a_question_in_a_session_is_answered_and_builds_nothing(
     out = capsys.readouterr().out
     assert "It serves /api/items from SQLite." in out
 
-    session_id = out.split("New session ", 1)[1].split(".", 1)[0]
+    session_id = out.split("Session ", 1)[1].split(" saved", 1)[0]
     conversation = Conversation.load(session_id)
     assert [t.kind for t in conversation.turns] == ["build", "ask"]
     assert conversation.turns[-1].answer
@@ -471,7 +471,7 @@ def test_a_remark_spends_nothing_at_all(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "noted" in out
 
-    session_id = out.split("New session ", 1)[1].split(".", 1)[0]
+    session_id = out.split("Session ", 1)[1].split(" saved", 1)[0]
     conversation = Conversation.load(session_id)
     assert [t.kind for t in conversation.turns] == ["build", "remark"]
 
@@ -492,7 +492,7 @@ def test_the_lane_can_be_named_outright(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "Answered on request." in out
 
-    session_id = out.split("New session ", 1)[1].split(".", 1)[0]
+    session_id = out.split("Session ", 1)[1].split(" saved", 1)[0]
     conversation = Conversation.load(session_id)
     assert [t.kind for t in conversation.turns] == ["build", "ask"]
 
@@ -532,7 +532,7 @@ def test_a_question_records_no_artifacts(tmp_path, monkeypatch, capsys):
     assert cli.main(["chat"]) == 0
 
     out = capsys.readouterr().out
-    session_id = out.split("New session ", 1)[1].split(".", 1)[0]
+    session_id = out.split("Session ", 1)[1].split(" saved", 1)[0]
     conversation = Conversation.load(session_id)
     assert not conversation.started
     assert [t.kind for t in conversation.turns] == ["ask"]
