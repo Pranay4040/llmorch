@@ -524,19 +524,38 @@ def test_a_token_that_cannot_be_saved_still_serves_this_run(tmp_path, monkeypatc
     assert len(configure_server.load_or_create_token()) >= 20
 
 
-def test_a_wrong_token_gets_a_page_rather_than_a_dead_end(site):
-    """A browser asked for a page. The old reply was a line of plain text
-    telling somebody to find a URL they no longer had."""
-    base, _ = site
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):
+        return None  # urllib then raises the 3xx as an HTTPError
+
+
+def test_a_stale_page_link_heals_itself(site):
+    """A reopened tab or an old bookmark carries a dead token. For the page
+    itself the server bounces it to the working URL, so the address bar just
+    corrects — no error, no trip to the terminal."""
+    base, token = site
+    opener = urllib.request.build_opener(_NoRedirect)
+
     with pytest.raises(urllib.error.HTTPError) as excinfo:
-        _get(f"{base}/?t=aStaleTokenFromAnEarlierRun")
+        opener.open(f"{base}/?t=aStaleTokenFromAnEarlierRun", timeout=10)
+    assert excinfo.value.code == 302
+    assert excinfo.value.headers["Location"] == f"/?t={token}"
+
+    # And urllib, like a browser, follows it to the real page.
+    with _get(f"{base}/?t=aStaleTokenFromAnEarlierRun") as response:
+        assert response.status == 200
+        assert b"llmorch setup" in response.read()
+
+
+def test_only_the_page_is_redirected_not_an_api_call(site):
+    """A state-changing request is never bounced — it gets the 401, and the
+    401 carries no token."""
+    base, token = site
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        _get(f"{base}/api/config?t=stale")
 
     assert excinfo.value.code == 401
-    body = excinfo.value.read().decode("utf-8")
-    assert "<title>" in body
-    assert "llmorch" in body
-    # It must not hand out the answer it is refusing.
-    assert "aStaleTokenFromAnEarlierRun" not in body
+    assert token not in excinfo.value.read().decode("utf-8")
 
 
 def test_the_refusal_never_carries_the_real_token(site):
