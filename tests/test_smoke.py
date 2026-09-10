@@ -60,7 +60,16 @@ def free_port() -> int:
 
 _FIXTURE = '''\
 import json
+import socketserver
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# http.server's server_bind() does a reverse-DNS lookup (socket.getfqdn) that
+# stalls ~30s on hosted CI macOS runners — long enough for the smoke run's boot
+# timeout to give up before this fixture ever binds. Skip it.
+class _Server(ThreadingHTTPServer):
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 PORT = {port}
 TABLE = json.loads(r"""{table}""")
@@ -98,7 +107,7 @@ class Handler(BaseHTTPRequestHandler):
     do_POST = _handle
 
 
-ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+_Server(("127.0.0.1", PORT), Handler).serve_forever()
 '''
 
 
