@@ -63,13 +63,26 @@ import json
 import socketserver
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# http.server's server_bind() does a reverse-DNS lookup (socket.getfqdn) that
-# stalls ~30s on hosted CI macOS runners — long enough for the smoke run's boot
-# timeout to give up before this fixture ever binds. Skip it.
+import sys, traceback
+
 class _Server(ThreadingHTTPServer):
+    # http.server's server_bind() does a reverse-DNS lookup (socket.getfqdn)
+    # that stalls ~30s on hosted CI macOS runners — long enough for the smoke
+    # run's boot timeout to give up before this fixture ever binds. Skip it.
     def server_bind(self):
         socketserver.TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]
+
+    # A probe that closes its connection mid-response is not a server error, but
+    # socketserver prints the ConnectionResetError traceback to stderr — and the
+    # smoke run reads any traceback on stderr as the server crashing. Windows
+    # resets aggressively enough that this was flaky. Swallow that family only;
+    # a real exception from handler code still prints.
+    def handle_error(self, request, client_address):
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            return
+        traceback.print_exc()
 
 PORT = {port}
 TABLE = json.loads(r"""{table}""")
