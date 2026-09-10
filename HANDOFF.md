@@ -1,24 +1,30 @@
 # llmorch — handoff
 
-**State:** M0–M6 done, plus the smoke run, the question lane, the setup page, live run tracking per-job model choice and the three session modes. 743 tests pass,
-1 skipped on Windows (a symlink test needing admin). Published at
+**State:** M0–M6 done, plus everything this session added — the smoke run, the
+question lane, the setup page, live run tracking, per-job model choice, the
+three session modes, round-robin assignment, session naming, eight more
+OpenRouter models, an MIT licence, and a macOS CI runner. 768 tests pass, 1
+skipped on Windows (a symlink test needing admin). Published at
 github.com/Pranay4040/llmorch, tagged `v0.1.0`.
 
 Two things in one repo:
 
-- **`llmorch.quota`** — a library for rationing calls across LLM providers.
-  Admission control, a durable usage ledger, a stdlib-only OpenAI-wire client.
-  This is the part with value outside the repo; see README.md.
-- **The orchestrator** — plans a task into a DAG, assigns each node by fitness
-  and remaining quota, executes across vendors with failover, writes a runnable
-  folder.
+- **The orchestrator** — one instruction becomes a runnable folder. A planner
+  writes an interface contract; models from different vendors each write one
+  file against it, alone; a model from another vendor reviews each; eight
+  deterministic checks read the finished set; `--smoke` starts it and drives it
+  over HTTP. `llmorch` opens a browser page to set it up, `llmorch start` opens
+  a session.
+- **`llmorch.quota`** — the rationing library it is built on, with no idea the
+  orchestrator exists. Admission control, a durable usage ledger, a stdlib-only
+  OpenAI-wire client. The part with value outside the repo; see README.md.
 
 ---
 
 ## Run it
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q                  # 743 tests, no network
+.venv/Scripts/python.exe -m pytest -q                  # 768 tests, no network
 .venv/Scripts/python.exe -m llmorch run "build a notes app"        # mock, offline
 .venv/Scripts/python.exe -m llmorch run --smoke "<task>"          # ...then run the result
 .venv/Scripts/python.exe -m llmorch run --smoke-install "<task>"  # ...installing its deps first
@@ -46,9 +52,10 @@ It is the same information the terminal prints, kept for someone reading it
 after the scrollback is gone.
 
 `.github/workflows/tests.yml` runs the suite on push and pull request across
-Linux (3.11, 3.13) and Windows (3.12), then does a full offline demo run with
-`--smoke`. Everything it does is offline, so CI needs no secrets and never
-spends quota.
+Linux (3.11, 3.13), Windows (3.12) and macOS (3.12), then does a full offline
+demo run with `--smoke`. Everything it does is offline, so CI needs no secrets
+and never spends quota. macOS was added this session, and adding it found a real
+fault — see the reverse-DNS entry below.
 
 ## Roster (verified live 2026-09-01; OpenRouter additions 2026-09-07)
 
@@ -127,16 +134,37 @@ Each was learned by getting it wrong against a live API.
   once and the older one answered a link the newer had just printed, which
   surfaces as "missing or wrong token" against a URL that is visibly correct.
   Both servers now refuse the bind and say what is already there.
-- **The setup token is kept, not minted per launch.** A fresh secret each time is
-  stronger and made every bookmark and reopened tab a dead end. A stable secret
-  stops a cross-origin post exactly as well; what it does not stop is a local
-  process reading `configure-token`, and such a process can already read `.env`.
-  A refused link now gets a page explaining itself rather than one line of text.
+- **The setup token is kept, not minted per launch, and a stale link heals
+  itself.** A fresh secret each time made every bookmark and reopened tab a dead
+  end. A stable secret stops a cross-origin post exactly as well; what it does
+  not stop is a local process reading `configure-token`, and such a process can
+  already read `.env`. Because it is stable, a `GET /` on a loopback `Host`
+  without the token is answered with a 302 to `/?t=<token>` — the browser
+  follows it and the address bar corrects itself. A cross-origin script cannot
+  read a cross-origin response or an opaque redirect's `Location`, so only a
+  real tab ever follows it; `POST /api/*` without the token still gets a bare
+  401 that carries no token.
+- **`http.server`'s `server_bind` does a reverse-DNS lookup that stalls on
+  macOS CI.** `socket.getfqdn(host)` on a hosted macOS runner — which has no PTR
+  record for 127.0.0.1 — takes ~30 seconds, past the smoke run's 15-second boot
+  timeout, so every smoke test failed with "bound no port". The demo notes app
+  and the smoke fixture both bind through a `ThreadingHTTPServer` subclass that
+  skips the lookup; `server_name` is only CGI and HTTP/1.0 plumbing, unused
+  here. Found by adding the macOS runner and reading a step-by-step diagnostic
+  it printed once.
+- **A smoke probe that answered is a pass, whatever its status class says
+  elsewhere.** The dashboard read `probe.ok`, and `Probe` has no such field — it
+  records what came back and leaves the verdict to the report's issues. So every
+  HTTP 200 rendered red. The verdict is derived now on the rule the engine
+  itself uses: 4xx and 5xx are faults, no answer at all is the worst one.
 - **A closed browser tab is not an error.** `socketserver` prints a traceback
   when a client drops a keep-alive connection, which the dashboard's five-second
   poll makes routine — fifteen lines into the middle of whatever the person was
-  reading in that terminal. Both servers swallow connection resets and nothing
-  else.
+  reading in that terminal. And on the smoke fixture a probe closing its
+  connection mid-response left a `ConnectionResetError` that the run read as the
+  server crashing (flaky on Windows). Every long-lived server here — configure,
+  dashboard, the demo app, the smoke fixture — now overrides `handle_error` to
+  swallow the connection-reset family and print anything else.
 - **Opening a tab is not choosing.** Each mode tab carries its own "always
   use this mode / ask me at the start" control, because a tab that selected the
   mode by being opened would mean you could not look at what a mode does without
@@ -406,6 +434,11 @@ Each was learned by getting it wrong against a live API.
   a restore will silently find nothing.
 - `llmorch.quota` must not import `engine`, `negotiate` or `demo` — there is a
   test asserting it.
+- The licence is declared three ways that must agree: `LICENSE`, the README, and
+  `pyproject.toml`'s `license = "MIT"` with `license-files`. That last spelling
+  is PEP 639, so the setuptools floor is `>=77` — an older one fails the build.
+  Verified by reinstalling and reading `License-Expression` back from the
+  metadata.
 
 ---
 
