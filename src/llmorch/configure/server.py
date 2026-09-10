@@ -17,6 +17,13 @@ stable secret stops a cross-origin post exactly as well as a fresh one, and the
 thing it does not stop — a local process reading the token file — is a process
 that can already read `.env`. See `load_or_create_token`.
 
+Because the token is stable, a stale link can heal itself: a GET for the page
+that arrives on a loopback `Host` without the token is redirected to the URL
+carrying it, so the address bar just corrects. That leaks nothing — a
+cross-origin script cannot read a cross-origin response or an opaque redirect's
+`Location`, so only the person in a real tab ever follows it. State-changing
+requests are never redirected; they get the 401.
+
 **A loopback `Host`.** The socket binds to 127.0.0.1, but binding is not enough
 on its own: a hostile name resolving to 127.0.0.1 makes a cross-origin page
 same-origin as far as the browser is concerned. Checking the header the browser
@@ -106,31 +113,30 @@ class ConfigureError(RuntimeError):
     pass
 
 
-# A browser asked for a page, so it gets one. The old reply was a line of plain
-# text telling somebody to find a URL they no longer had, which is a dead end
-# reached by doing something reasonable.
+# The fallback body for a tokenless request. A real browser asking for the page
+# never sees it — `do_GET` redirects that to the working URL (the token is
+# stable, so the address bar just corrects itself). This is what a client that
+# does not follow the redirect gets, and what an API call without the token
+# gets. It carries no token: a bare 401 for anything that could change state.
 STALE_LINK = """<!doctype html>
 <meta charset="utf-8">
 <title>llmorch setup — wrong link</title>
 <style>
   body { background:#0f1115; color:#e6e9ef; margin:0; padding:48px 24px;
-         font:14px/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  @media (prefers-color-scheme: light) { body { background:#f7f8fa; color:#12151b; } }
-  main { max-width: 640px; margin: 0 auto; }
+         font:14px/1.7 "Segoe UI", system-ui, sans-serif; }
+  main { max-width: 620px; margin: 0 auto; }
   h1 { font-size: 18px; margin: 0 0 14px; }
-  p { color:#8b93a3; }
-  code { border:1px solid #242a34; border-radius:4px; padding:1px 6px; }
+  p { color:#98a0af; }
+  code { font-family:"Cascadia Mono", ui-monospace, Consolas, monospace;
+         border:1px solid #242a34; border-radius:4px; padding:1px 6px; }
 </style>
 <main>
-  <h1>This link is missing its token.</h1>
+  <h1>This link is out of date.</h1>
   <p>
-    The setup page will only answer a URL that carries the token for this
-    machine, because it can write API keys and any other page in your browser
-    could otherwise post to it.
-  </p>
-  <p>
-    Run <code>llmorch</code> in a terminal and open the URL it prints. That link
-    now stays the same, so this one will keep working once you have used it.
+    It is missing the token for this machine. Opening
+    <code>http://127.0.0.1:8788/</code> should send you straight to the working
+    page; if it does not, run <code>llmorch</code> in a terminal and open the
+    URL it prints — that link is stable now and will keep working.
   </p>
 </main>
 """
@@ -311,6 +317,13 @@ class _Handler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
     # -- routes -----------------------------------------------------------
 
     def do_GET(self) -> None:  # noqa: N802 - name fixed by the stdlib
@@ -318,6 +331,19 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/healthz":
             self._send(200, "text/plain", b"ok")
             return
+
+        # A stale bookmark or a reopened tab lands here with an old token or
+        # none. For the page itself, bounce it to the working URL rather than
+        # showing an error — the token is stable, so the address bar just
+        # corrects itself. This leaks nothing: a cross-origin script cannot read
+        # a cross-origin response or an opaque redirect's Location, so only the
+        # person in a real tab ever follows it. API calls are not redirected;
+        # they get the 401.
+        if path == "/" and self._host_is_loopback() and not self._authorised():
+            if self.token:
+                self._redirect(f"/?t={self.token}")
+                return
+
         if not self._guarded():
             return
 
