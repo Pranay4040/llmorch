@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "llmorch"
 version = "0.1.0"
-description = "Quota governance for multi-provider LLM applications, and an orchestrator built on it"
+description = "Splits a build across models from different vendors — each writes one file to a shared contract, another vendor reviews it — plus the request-rationing library it runs on"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
