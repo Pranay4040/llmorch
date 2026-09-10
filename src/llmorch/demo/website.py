@@ -180,11 +180,32 @@ _SERVER = '''\
 """Notes API — standard library only."""
 
 import json
+import socketserver
 import sqlite3
+import sys
+import traceback
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
+
+
+class _Server(ThreadingHTTPServer):
+    # http.server's server_bind() calls socket.getfqdn(host), a reverse-DNS
+    # lookup that can stall ~30 seconds on a host whose resolver returns no
+    # PTR for 127.0.0.1 (seen on hosted CI macOS runners). server_name is
+    # unused here, so skip the lookup and bind straight away.
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+    # A client that hangs up mid-response is not a server fault; do not print
+    # its traceback.
+    def handle_error(self, request, client_address):
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            return
+        traceback.print_exc()
 
 HERE = Path(__file__).parent
 DB_PATH = HERE / "notes.db"
@@ -305,7 +326,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     init_db()
     print(f"Notes app running at http://localhost:{PORT}")
-    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    _Server(("127.0.0.1", PORT), Handler).serve_forever()
 '''
 
 _INDEX = """\

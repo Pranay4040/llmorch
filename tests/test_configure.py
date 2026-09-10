@@ -581,3 +581,23 @@ def test_a_second_server_refuses_the_port_rather_than_racing_for_it(site):
         build_server("127.0.0.1", port, token=new_token())
 
     assert "already in use" in str(excinfo.value)
+
+
+def test_the_port_guard_is_windows_only(monkeypatch):
+    """`SO_REUSEADDR` does not mean the same thing on both platforms. On Windows
+    it permits the duplicate bind this guard exists to stop; on POSIX it only
+    skips TIME_WAIT, and disabling it there makes a quick restart fail with
+    EADDRINUSE — reported as another instance running, which would be a lie."""
+    import os as os_module
+
+    from llmorch.configure import server as configure_server
+    from llmorch.dashboard import server as dashboard_server
+
+    expected = os_module.name != "nt"
+    assert configure_server._Server.allow_reuse_address is expected
+
+    built = dashboard_server.build_server("127.0.0.1", 0)
+    try:
+        assert built.allow_reuse_address is expected
+    finally:
+        built.server_close()
