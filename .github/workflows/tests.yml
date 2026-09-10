@@ -57,6 +57,13 @@ jobs:
       - name: Install
         run: pip install -e ".[dev]"
 
+      # TEMPORARY. Every smoke test fails on macOS with the started process
+      # alive, silent, and never listening, and the obvious causes are ruled out
+      # by reading. This reproduces the pattern step by step so the runner can
+      # say which step differs. Remove once the answer is known.
+      - name: Diagnose smoke boot
+        run: python tools/diagnose_smoke_boot.py
+
       - name: Tests
         run: python -m pytest -q
 
