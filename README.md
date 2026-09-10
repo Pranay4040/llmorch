@@ -2,115 +2,39 @@
 
 [![tests](https://github.com/Pranay4040/llmorch/actions/workflows/tests.yml/badge.svg)](https://github.com/Pranay4040/llmorch/actions/workflows/tests.yml)
 
-**Quota governance for applications that call several LLM providers** — plus an
-orchestrator built on top of it, as the worked example.
+**One instruction becomes a runnable project, written by models from several
+different vendors at once.**
 
-The hard part of using free and low tiers is not cost. It is that they are
-rationed along several axes at once, with different numbers per provider, days
-that end at different midnights, and limits that are sometimes shared across
-every model on an account. Get that arithmetic wrong and you do not get a
-slightly worse result — you get a 429 in the middle of work you have already
-partly paid for.
+You say *build a notes app with tags*. llmorch splits that into files, hands each
+one to whichever model is best placed to write it, has a model from a *different*
+vendor review what the first one wrote, checks that the finished files agree with
+each other, then starts the thing and drives it over HTTP to find out whether it
+actually runs. What lands on disk is a folder you can open and use, beside a
+report saying which model wrote what and what the evidence for it is.
 
-```python
-from llmorch.quota import Governor, Ticket, model_spec, provider_spec, quota_manifest
+Splitting work across vendors is easy to say and awkward to do. This project is
+mostly about the two things that make it awkward.
 
-manifest = quota_manifest(
-    providers=[
-        provider_spec(
-            "groq",
-            base_url="https://api.groq.com/openai/v1",
-            api_key_env="GROQ_API_KEY",
-            rpm=30, tpm=8000, rpd=1000,   # as the provider's docs state them
-            reserve_requests=50,          # held back for critical retries
-        ),
-    ],
-    models=[
-        model_spec(
-            "groq/gpt-oss-120b",
-            provider="groq",
-            wire_name="openai/gpt-oss-120b",
-            context=131072,
-            max_output=4096,
-        ),
-    ],
-)
+**The models cannot talk to each other.** Each one writes a single file, alone,
+with no sight of the others and no memory between them. So before any of them
+start, a planner writes an *interface contract* — the routes, the data shapes,
+the page names, the runtime it all has to work under — and every model is handed
+it verbatim. That contract is the only coordination there is, and it is the
+reason a frontend written by one vendor works against a backend written by
+another. Everything else in here exists to check that the contract was kept.
 
-governor = Governor(manifest)
+**Free tiers are rationed along several axes at once**, with different numbers
+per provider, days that end at different midnights, and limits that are
+sometimes shared across every model on an account. Get that arithmetic wrong and
+you do not get a slightly worse result — you get a 429 in the middle of work you
+have already partly paid for. So every request in the system, the planning
+request included, goes through admission control before it is sent.
 
-verdict = governor.try_acquire("groq/gpt-oss-120b", 400, 1200)
-if isinstance(verdict, Ticket):
-    ...                                    # call the provider, then:
-    # governor.commit(verdict, response.usage)
-else:
-    print(verdict.verdict.value, verdict.reason)
-```
+Nothing here needs an API key to try. `llmorch run "build a notes app"` runs the
+whole pipeline against a mock provider, offline, and writes a folder at the end
+of it.
 
-No YAML, no role taxonomy, no dependency on the orchestrator.
-
-## The distinction the whole thing turns on
-
-Every refusal is not the same refusal:
-
-| Verdict | Meaning | What a caller should do |
-|---|---|---|
-| `GRANTED` | proceed | send the request |
-| `WAIT` | a per-minute window is full | sleep `retry_after_s`, then retry |
-| `EXHAUSTED_TODAY` | daily cap reached | try another provider; resume after its local midnight |
-| `UNSERVABLE` | larger than the per-minute ceiling | never send it at this size — split it |
-| `COST_BLOCKED` | would spend real money unauthorised | nothing, until a budget is set |
-
-**`UNSERVABLE` is not `WAIT`.** A request bigger than a provider's per-minute
-token ceiling will not fit however long you wait, and treating it as a wait
-condition hangs the caller forever. Against an 8,000 TPM provider this case is
-routine, not exotic.
-
-**`WAIT` is not `EXHAUSTED_TODAY`.** A window that clears in nine seconds is not
-a model being unavailable for the day, and conflating them writes off a healthy
-provider until midnight. Both distinctions were learned by getting them wrong.
-
-## What else is in here
-
-| Piece | What it does |
-|---|---|
-| `llmorch.quota.Governor` | Admission control across RPM / TPM / RPD / TPD, account- and model-scoped, with a reserve for critical work |
-| `llmorch.quota.LedgerStore` | Append-only SQLite record of every call, stamped with the **provider's own** day key |
-| `llmorch.quota.restore_governor` | Replays today's ledger at startup, so a fresh process does not think it holds the whole daily allowance |
-| `llmorch.quota.TokenEstimator` | Character-based estimation, self-correcting per provider from real usage |
-| `llmorch.providers.OpenAICompatProvider` | Dependency-free client for any OpenAI-shaped endpoint |
-| `llmorch.providers.parse_rate_limit_headers` | Turns `x-ratelimit-*` headers — and prose like *"retry in 12.4s"* — into a snapshot |
-
-Three properties worth knowing, because they are easy to get wrong and all
-three cost a live 429 to discover:
-
-- **Reserve on the estimate, reconcile on commit.** Without it, concurrent
-  fan-out races: several callers each read a counter none of them has yet
-  incremented.
-- **Monotonic clock for sliding windows, wall clock for day boundaries, never
-  mixed.** Wall time for a per-minute window lets a clock adjustment grant free
-  quota; monotonic time for a daily counter never resets.
-- **Response headers override local counters.** Local counting is inference;
-  headers are fact, and they cost nothing to read. A stated wait also outranks
-  any keyword in the body — if the server says come back in twelve seconds,
-  waiting works, whatever else the error text mentions.
-
-## No dependencies you did not ask for
-
-`PyYAML`, `pydantic` and `tzdata` — the last only because Windows ships no
-timezone database, and a provider whose day ends at Pacific midnight cannot be
-tracked without one.
-
-Deliberately **not** an HTTP library and **not** a vendor SDK. The provider
-client is stdlib `urllib` on a worker thread, because every SDK ships its own
-retry and rate-limit machinery, which would sit *underneath* the governor and
-silently retry requests it never admitted. Admission control only works if every
-call goes through it.
-
-## The orchestrator
-
-The application this was built for splits a task across models from different
-vendors, assigns each slice by fitness and remaining quota, and writes a
-runnable project folder:
+## Using it
 
 ### Quick start
 
@@ -353,6 +277,106 @@ them), `discover` (ask a key which models it can reach, spending no tokens),
 left enabled that nothing can reach is a node assigned to nobody. The same
 narrowing covers a provider that is enabled in `models.yaml` with no key in the
 environment, which is the identical fault through a quieter door.
+
+## The library underneath
+
+The quota half is a library in its own right, and the part of this repository
+with value outside it: `llmorch.quota` does the rationing arithmetic above and
+has no idea the orchestrator exists.
+
+```python
+from llmorch.quota import Governor, Ticket, model_spec, provider_spec, quota_manifest
+
+manifest = quota_manifest(
+    providers=[
+        provider_spec(
+            "groq",
+            base_url="https://api.groq.com/openai/v1",
+            api_key_env="GROQ_API_KEY",
+            rpm=30, tpm=8000, rpd=1000,   # as the provider's docs state them
+            reserve_requests=50,          # held back for critical retries
+        ),
+    ],
+    models=[
+        model_spec(
+            "groq/gpt-oss-120b",
+            provider="groq",
+            wire_name="openai/gpt-oss-120b",
+            context=131072,
+            max_output=4096,
+        ),
+    ],
+)
+
+governor = Governor(manifest)
+
+verdict = governor.try_acquire("groq/gpt-oss-120b", 400, 1200)
+if isinstance(verdict, Ticket):
+    ...                                    # call the provider, then:
+    # governor.commit(verdict, response.usage)
+else:
+    print(verdict.verdict.value, verdict.reason)
+```
+
+No YAML, no role taxonomy, no dependency on the orchestrator.
+
+### The distinction the whole thing turns on
+
+Every refusal is not the same refusal:
+
+| Verdict | Meaning | What a caller should do |
+|---|---|---|
+| `GRANTED` | proceed | send the request |
+| `WAIT` | a per-minute window is full | sleep `retry_after_s`, then retry |
+| `EXHAUSTED_TODAY` | daily cap reached | try another provider; resume after its local midnight |
+| `UNSERVABLE` | larger than the per-minute ceiling | never send it at this size — split it |
+| `COST_BLOCKED` | would spend real money unauthorised | nothing, until a budget is set |
+
+**`UNSERVABLE` is not `WAIT`.** A request bigger than a provider's per-minute
+token ceiling will not fit however long you wait, and treating it as a wait
+condition hangs the caller forever. Against an 8,000 TPM provider this case is
+routine, not exotic.
+
+**`WAIT` is not `EXHAUSTED_TODAY`.** A window that clears in nine seconds is not
+a model being unavailable for the day, and conflating them writes off a healthy
+provider until midnight. Both distinctions were learned by getting them wrong.
+
+### What else is in the library
+
+| Piece | What it does |
+|---|---|
+| `llmorch.quota.Governor` | Admission control across RPM / TPM / RPD / TPD, account- and model-scoped, with a reserve for critical work |
+| `llmorch.quota.LedgerStore` | Append-only SQLite record of every call, stamped with the **provider's own** day key |
+| `llmorch.quota.restore_governor` | Replays today's ledger at startup, so a fresh process does not think it holds the whole daily allowance |
+| `llmorch.quota.TokenEstimator` | Character-based estimation, self-correcting per provider from real usage |
+| `llmorch.providers.OpenAICompatProvider` | Dependency-free client for any OpenAI-shaped endpoint |
+| `llmorch.providers.parse_rate_limit_headers` | Turns `x-ratelimit-*` headers — and prose like *"retry in 12.4s"* — into a snapshot |
+
+Three properties worth knowing, because they are easy to get wrong and all
+three cost a live 429 to discover:
+
+- **Reserve on the estimate, reconcile on commit.** Without it, concurrent
+  fan-out races: several callers each read a counter none of them has yet
+  incremented.
+- **Monotonic clock for sliding windows, wall clock for day boundaries, never
+  mixed.** Wall time for a per-minute window lets a clock adjustment grant free
+  quota; monotonic time for a daily counter never resets.
+- **Response headers override local counters.** Local counting is inference;
+  headers are fact, and they cost nothing to read. A stated wait also outranks
+  any keyword in the body — if the server says come back in twelve seconds,
+  waiting works, whatever else the error text mentions.
+
+### No dependencies you did not ask for
+
+`PyYAML`, `pydantic` and `tzdata` — the last only because Windows ships no
+timezone database, and a provider whose day ends at Pacific midnight cannot be
+tracked without one.
+
+Deliberately **not** an HTTP library and **not** a vendor SDK. The provider
+client is stdlib `urllib` on a worker thread, because every SDK ships its own
+retry and rate-limit machinery, which would sit *underneath* the governor and
+silently retry requests it never admitted. Admission control only works if every
+call goes through it.
 
 ## What is in this repository
 
